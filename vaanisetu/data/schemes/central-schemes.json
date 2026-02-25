@@ -1,0 +1,52 @@
+[
+  {
+    "scheme_id": "SCHEME-001",
+    "scheme_code": "PM-KISAN",
+    "name_en": "Pradhan Mantri Kisan Samman Nidhi",
+    "name_hi": "प्रधानमंत्री किसान सम्मान निधि",
+    "name_ta": "பிரதம மந்திரி கிசான் சம்மன் நிதி",
+    "name_te": "ప్రధాన మంత్రి కిసాన్ సమ్మాన్ నిధి",
+    "description": "Income support of ₹6,000 per year to all farmer families",
+    "category": "agriculture",
+    "benefit_type": "direct_benefit",
+    "benefit_amount_min": 6000,
+    "benefit_amount_max": 6000,
+    "ministry": "Ministry of Agriculture and Farmers Welfare",
+    "level": "central",
+    "eligibility_criteria": {
+      "occupation": ["farmer"],
+      "landholding": "any",
+      "ageMin": 18,
+      "incomeMax": null,
+      "states": "all"
+    },
+    "documents_required": ["aadhaar", "land_record", "bank_account"],
+    "application_url": "https://pmkisan.gov.in/",
+    "is_active": true
+  },
+  {
+    "scheme_id": "SCHEME-002",
+    "scheme_code": "MUDRA-SHISHU",
+    "name_en": "MUDRA Shishu Loan",
+    "name_hi": "मुद्रा शिशु ऋण",
+    "name_ta": "முத்ரா ஷிஷு கடன்",
+    "name_te": "ముద్ర శిశు రుణం",
+    "description": "Business loan up to ₹50,000 for micro-enterprises",
+    "category": "financial_inclusion",
+    "benefit_type": "loan",
+    "benefit_amount_min": 10000,
+    "benefit_amount_max": 50000,
+    "ministry": "Ministry of Finance",
+    "level": "central",
+    "eligibility_criteria": {
+      "occupation": ["self_employed", "entrepreneur"],
+      "ageMin": 18,
+      "ageMax": 65,
+      "incomeMax": 1000000,
+      "states": "all"
+    },
+    "documents_required": ["aadhaar", "pan", "bank_account", "business_plan"],
+    "application_url": "https://www.mudra.org.in/",
+    "is_active": true
+  }
+]

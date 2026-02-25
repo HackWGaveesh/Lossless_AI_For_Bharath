@@ -1,0 +1,19 @@
+{
+  "name": "vaanisetu",
+  "version": "1.0.0",
+  "description": "Voice-first AI platform for rural India",
+  "private": true,
+  "workspaces": ["frontend", "backend", "infrastructure"],
+  "scripts": {
+    "setup": "bash scripts/setup.sh",
+    "dev": "npm run dev --workspace=frontend & npm run dev --workspace=backend",
+    "build": "npm run build --workspace=frontend && npm run build --workspace=backend",
+    "deploy": "bash scripts/deploy.sh",
+    "test": "bash scripts/test.sh",
+    "seed": "bash scripts/seed-data.sh"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  }
+}
