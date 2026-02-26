@@ -12,32 +12,36 @@ export default function Header({ onMenuClick }: HeaderProps) {
   const { user } = useAuth();
 
   return (
-    <header className="bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between sticky top-0 z-40">
+    <header className="bg-surface-card border-b border-surface-border px-4 py-3 flex items-center justify-between sticky top-0 z-40">
       <div className="flex items-center gap-4">
         <button
           onClick={onMenuClick}
-          className="p-2 rounded-lg hover:bg-gray-100 lg:hidden"
+          className="p-2 rounded-lg hover:bg-surface-elevated lg:hidden"
           aria-label="Toggle menu"
         >
-          <Menu className="w-6 h-6 text-gray-600" />
+          <Menu className="w-6 h-6 text-text-secondary" />
         </button>
-        <Link to="/dashboard" className="text-xl font-bold text-primary-600">
-          VaaniSetu
+        <Link to="/dashboard" className="font-display text-xl font-semibold text-primary-500">
+          वाणी<span className="font-sans font-medium text-text-primary">Setu</span>
         </Link>
       </div>
       <div className="flex items-center gap-4">
         <LanguageSwitcher />
-        <button className="p-2 rounded-lg hover:bg-gray-100 relative" aria-label="Notifications">
-          <Bell className="w-5 h-5 text-gray-600" />
+        <button
+          className="p-2 rounded-lg hover:bg-surface-elevated relative"
+          aria-label="Notifications"
+        >
+          <Bell className="w-5 h-5 text-text-secondary" />
+          <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-amber-500" aria-hidden />
         </button>
         <Link
           to="/profile"
-          className="flex items-center gap-2 p-2 rounded-lg hover:bg-gray-100"
+          className="flex items-center gap-2 p-2 rounded-lg hover:bg-surface-elevated"
         >
           <div className="w-8 h-8 rounded-full bg-primary-100 flex items-center justify-center">
-            <User className="w-4 h-4 text-primary-600" />
+            <User className="w-4 h-4 text-primary-500" />
           </div>
-          <span className="hidden sm:inline font-medium text-gray-700">{user?.name ?? 'User'}</span>
+          <span className="hidden sm:inline font-medium text-text-primary">{user?.name ?? 'User'}</span>
         </Link>
       </div>
     </header>

@@ -35,7 +35,7 @@ export const handler: APIGatewayProxyHandler = async (event) => {
       secretArn: process.env.DB_SECRET_ARN!,
       database: process.env.DB_NAME!,
       sql,
-      parameters,
+      parameters: parameters as never,
     }));
 
     const schemes = (result.records ?? []).map((record) => ({

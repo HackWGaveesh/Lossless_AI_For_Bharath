@@ -1,0 +1,85 @@
+#!/usr/bin/env node
+/**
+ * Builds the frontend, uploads dist/ to S3, and invalidates CloudFront.
+ * Prerequisites: CDK stack deployed, frontend/.env populated (run write-env-from-cdk.js first).
+ * Usage: node scripts/deploy-frontend.js [--stack-name VaaniSetuStack] [--region ap-south-1] [--no-build]
+ */
+
+const { execSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+
+const args = process.argv.slice(2);
+let stackName = 'VaaniSetuStack';
+let region = 'ap-south-1';
+let skipBuild = false;
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--stack-name' && args[i + 1]) stackName = args[++i];
+  else if (args[i] === '--region' && args[i + 1]) region = args[++i];
+  else if (args[i] === '--no-build') skipBuild = true;
+}
+
+const rootDir = path.resolve(__dirname, '..');
+const frontendDir = path.join(rootDir, 'frontend');
+const distDir = path.join(frontendDir, 'dist');
+
+function getOutputs() {
+  try {
+    const out = execSync(
+      `aws cloudformation describe-stacks --stack-name ${stackName} --region ${region} --query "Stacks[0].Outputs" --output json`,
+      { encoding: 'utf8', maxBuffer: 1024 * 1024, cwd: rootDir }
+    );
+    const outputs = JSON.parse(out);
+    const map = {};
+    for (const o of outputs) map[o.OutputKey] = o.OutputValue;
+    return map;
+  } catch (e) {
+    console.error('Failed to get stack outputs. Deploy CDK first: cd infrastructure && npx cdk deploy --all --require-approval never');
+    console.error(e.message || e);
+    process.exit(1);
+  }
+}
+
+const outputs = getOutputs();
+const frontendBucket = outputs.FrontendBucketName;
+const distributionId = outputs.CloudFrontDistributionId;
+const cloudFrontUrl = outputs.CloudFrontURL;
+
+if (!frontendBucket) {
+  console.error('FrontendBucketName not in stack outputs. Ensure CDK stack exports it.');
+  process.exit(1);
+}
+
+if (!skipBuild) {
+  console.log('Building frontend...');
+  execSync('npm run build', { stdio: 'inherit', cwd: frontendDir });
+}
+
+if (!fs.existsSync(distDir)) {
+  console.error('frontend/dist not found. Run npm run build in frontend.');
+  process.exit(1);
+}
+
+console.log('Uploading frontend to S3:', frontendBucket);
+execSync(`aws s3 sync "${distDir}" s3://${frontendBucket}/ --delete --region ${region}`, {
+  stdio: 'inherit',
+  cwd: rootDir,
+});
+
+// Ensure index.html is no-cache
+execSync(`aws s3 cp "${path.join(distDir, 'index.html')}" s3://${frontendBucket}/index.html --content-type "text/html" --cache-control "no-cache, no-store, must-revalidate" --region ${region}`, {
+  stdio: 'inherit',
+  cwd: rootDir,
+});
+
+if (distributionId) {
+  console.log('Invalidating CloudFront cache...');
+  execSync(`aws cloudfront create-invalidation --distribution-id ${distributionId} --paths "/*" --output json`, {
+    stdio: 'inherit',
+    cwd: rootDir,
+  });
+  console.log('\n✅ Frontend deployed. URL:', cloudFrontUrl || `https://${distributionId}.cloudfront.net`);
+} else {
+  console.log('\n✅ Upload complete. CloudFrontDistributionId not in outputs; invalidate cache manually if needed.');
+  if (cloudFrontUrl) console.log('   URL:', cloudFrontUrl);
+}

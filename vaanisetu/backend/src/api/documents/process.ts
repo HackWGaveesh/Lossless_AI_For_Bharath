@@ -35,7 +35,7 @@ export const handler: S3Handler = async (event) => {
       const documentId = (parts[2] ?? '').split('.')[0];
 
       await docClient.send(new PutCommand({
-        TableName: 'vaanisetu-documents',
+        TableName: process.env.DOCUMENTS_TABLE ?? 'vaanisetu-documents',
         Item: {
           user_id: userId,
           document_id: documentId,

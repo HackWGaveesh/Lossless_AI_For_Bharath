@@ -2,10 +2,14 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from 'react-query';
+import { configureAmplify } from './config/amplify';
 import { AuthProvider } from './contexts/AuthContext';
 import { LanguageProvider } from './contexts/LanguageContext';
 import App from './App';
+import ErrorBoundary from './components/Common/ErrorBoundary';
 import './styles/globals.css';
+
+configureAmplify();
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -23,7 +27,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       <QueryClientProvider client={queryClient}>
         <LanguageProvider>
           <AuthProvider>
-            <App />
+            <ErrorBoundary>
+              <App />
+            </ErrorBoundary>
           </AuthProvider>
         </LanguageProvider>
       </QueryClientProvider>

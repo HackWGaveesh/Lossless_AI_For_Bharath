@@ -7,6 +7,8 @@ const languages = [
   { code: 'hi' as const, label: 'हिंदी' },
   { code: 'ta' as const, label: 'தமிழ்' },
   { code: 'te' as const, label: 'తెలుగు' },
+  { code: 'mr' as const, label: 'मराठी' },
+  { code: 'kn' as const, label: 'ಕನ್ನಡ' },
 ];
 
 export default function LanguageSwitcher() {
@@ -19,10 +21,10 @@ export default function LanguageSwitcher() {
           key={code}
           onClick={() => setLanguage(code)}
           className={clsx(
-            'px-3 py-1.5 text-sm font-medium transition-colors',
+            'px-3 py-1.5 text-sm font-medium transition-colors rounded-md',
             language === code
-              ? 'bg-primary-600 text-white'
-              : 'bg-white text-gray-600 hover:bg-gray-50'
+              ? 'bg-primary-500 text-white'
+              : 'bg-surface-card text-text-secondary hover:bg-surface-elevated border border-surface-border'
           )}
         >
           {label}

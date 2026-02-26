@@ -14,17 +14,23 @@ export default function Button({
   children,
   ...props
 }: ButtonProps) {
-  const baseClasses = 'font-medium rounded-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed';
+  const baseClasses =
+    'font-medium rounded-lg transition-all duration-150 ease-out disabled:opacity-40 disabled:cursor-not-allowed disabled:transform-none';
+
   const variantClasses = {
-    primary: 'bg-primary-600 text-white hover:bg-primary-700 shadow-sm hover:shadow-md',
-    secondary: 'bg-secondary-600 text-white hover:bg-secondary-700 shadow-sm hover:shadow-md',
-    outline: 'border-2 border-primary-600 text-primary-600 hover:bg-primary-50',
-    ghost: 'text-gray-700 hover:bg-gray-100',
+    primary:
+      'bg-primary-500 text-white shadow-primary hover:bg-primary-400 hover:shadow-primary-hover hover:-translate-y-px active:translate-y-0 active:shadow-sm',
+    secondary:
+      'bg-secondary-500 text-white shadow-md hover:opacity-95 hover:-translate-y-px active:translate-y-0',
+    outline:
+      'border-2 border-primary-500 text-primary-500 bg-transparent hover:bg-primary-50 active:bg-primary-100',
+    ghost: 'text-text-primary hover:bg-surface-elevated active:bg-surface-border',
   };
+
   const sizeClasses = {
-    sm: 'px-3 py-1.5 text-sm',
-    md: 'px-4 py-2 text-base',
-    lg: 'px-6 py-3 text-lg',
+    sm: 'px-3 py-1.5 text-sm rounded-md',
+    md: 'px-6 py-3 text-base rounded-lg',
+    lg: 'px-8 py-4 text-lg rounded-lg',
   };
 
   return (
