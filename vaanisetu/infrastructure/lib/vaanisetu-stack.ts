@@ -55,6 +55,15 @@ export class VaaniSetuStack extends cdk.Stack {
           transitions: [{ storageClass: s3.StorageClass.INTELLIGENT_TIERING, transitionAfter: cdk.Duration.days(30) }],
         },
       ],
+      cors: [
+        {
+          allowedOrigins: ['*'],
+          allowedMethods: [s3.HttpMethods.PUT, s3.HttpMethods.GET, s3.HttpMethods.HEAD],
+          allowedHeaders: ['*'],
+          exposedHeaders: ['ETag'],
+          maxAge: 3000,
+        },
+      ],
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
@@ -137,11 +146,29 @@ export class VaaniSetuStack extends cdk.Stack {
       ],
     });
     lambdaExecutionRole.addToPolicy(new iam.PolicyStatement({
-      actions: ['bedrock:InvokeAgent', 'bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
+      actions: [
+        'bedrock:InvokeAgent',
+        'bedrock:InvokeModel',
+        'bedrock:InvokeModelWithResponseStream',
+        'bedrock:Retrieve',
+      ],
       resources: ['*'],
     }));
     lambdaExecutionRole.addToPolicy(new iam.PolicyStatement({
-      actions: ['textract:AnalyzeDocument', 'textract:DetectDocumentText'],
+      actions: ['sns:Publish'],
+      resources: ['*'],
+    }));
+    lambdaExecutionRole.addToPolicy(new iam.PolicyStatement({
+      actions: [
+        'textract:AnalyzeDocument',
+        'textract:DetectDocumentText',
+        'textract:StartDocumentTextDetection',
+        'textract:GetDocumentTextDetection',
+      ],
+      resources: ['*'],
+    }));
+    lambdaExecutionRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['transcribe:StartTranscriptionJob', 'transcribe:GetTranscriptionJob'],
       resources: ['*'],
     }));
     usersTable.grantReadWriteData(lambdaExecutionRole);
@@ -150,6 +177,127 @@ export class VaaniSetuStack extends cdk.Stack {
     documentsTable.grantReadWriteData(lambdaExecutionRole);
     documentsBucket.grantReadWrite(lambdaExecutionRole);
     dbCluster.grantDataApiAccess(lambdaExecutionRole);
+
+    // SNS Topic for notifications (moved here so custom auth Lambda can reference it)
+    const notificationTopic = new sns.Topic(this, 'NotificationTopic', {
+      topicName: 'vaanisetu-notifications',
+      displayName: 'VaaniSetu User Notifications',
+    });
+
+    // Custom Auth Lambda — Define Auth Challenge
+    const defineAuthChallengeFn = new lambda.Function(this, 'DefineAuthChallenge', {
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      timeout: cdk.Duration.seconds(10),
+      code: lambda.Code.fromInline(`
+exports.handler = async (event) => {
+  const session = event.request.session || [];
+  if (session.length >= 3) {
+    event.response.issueTokens = false;
+    event.response.failAuthentication = true;
+  } else if (
+    session.length > 0 &&
+    session[session.length - 1].challengeName === 'CUSTOM_CHALLENGE' &&
+    session[session.length - 1].challengeResult === true
+  ) {
+    event.response.issueTokens = true;
+    event.response.failAuthentication = false;
+  } else {
+    event.response.issueTokens = false;
+    event.response.failAuthentication = false;
+    event.response.challengeName = 'CUSTOM_CHALLENGE';
+  }
+  return event;
+};`),
+    });
+
+    // Custom Auth Lambda — Create Auth Challenge (sends OTP via SNS SMS)
+    const createAuthChallengeFn = new lambda.Function(this, 'CreateAuthChallenge', {
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      timeout: cdk.Duration.seconds(15),
+      environment: {
+        TEST_OTP_ENABLED: 'true',
+        TEST_OTP_CODE: '112233',
+        TEST_OTP_PHONES: process.env.TEST_OTP_PHONES || '+918431672149,+919878543210',
+      },
+      code: lambda.Code.fromInline(`
+const { SNSClient, PublishCommand } = require('@aws-sdk/client-sns');
+const snsClient = new SNSClient({ region: process.env.AWS_REGION || 'ap-south-1' });
+
+exports.handler = async (event) => {
+  const session = event.request.session || [];
+  const phone = event.request.userAttributes?.phone_number;
+  const testOtpEnabled = process.env.TEST_OTP_ENABLED === 'true';
+  const testOtpCode = (process.env.TEST_OTP_CODE || '112233').replace(/\\D/g, '').slice(0, 6) || '112233';
+  const testOtpPhones = (process.env.TEST_OTP_PHONES || '')
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const isTestOtpPhone = !!phone && testOtpPhones.includes(phone);
+  
+  console.log('phone=', phone);
+  
+  if (!phone) {
+    throw new Error('No phone_number in userAttributes');
+  }
+
+  let code;
+  if (!session.length) {
+    if (testOtpEnabled && isTestOtpPhone) {
+      code = testOtpCode;
+      console.log('Using test OTP fallback for whitelisted phone');
+    } else {
+      code = Math.floor(100000 + Math.random() * 900000).toString();
+      await snsClient.send(new PublishCommand({
+        PhoneNumber: phone,
+        Message: 'Your VaaniSetu OTP is: ' + code + '. Valid for 5 minutes.',
+      }));
+      console.log('SMS sent');
+    }
+  } else {
+    code = session[session.length - 1].challengeMetadata.replace('CODE-', '');
+  }
+
+  event.response.publicChallengeParameters = {
+    phone,
+    delivery: testOtpEnabled && isTestOtpPhone ? 'test' : 'sms',
+  };
+  event.response.privateChallengeParameters = { answer: code };
+  event.response.challengeMetadata = 'CODE-' + code;
+  return event;
+};`),
+    });
+    createAuthChallengeFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['sns:Publish'],
+      resources: ['*'],
+    }));
+
+    // Custom Auth Lambda — Verify Auth Challenge Response
+    const verifyAuthChallengeResponseFn = new lambda.Function(this, 'VerifyAuthChallengeResponse', {
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      timeout: cdk.Duration.seconds(10),
+      code: lambda.Code.fromInline(`
+exports.handler = async (event) => {
+  event.response.answerCorrect =
+    event.request.privateChallengeParameters.answer === event.request.challengeAnswer;
+  return event;
+};`),
+    });
+
+    // Pre Sign-up: auto-confirm and auto-verify phone so new users can use custom auth OTP immediately
+    const preSignUpFn = new lambda.Function(this, 'PreSignUp', {
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      timeout: cdk.Duration.seconds(5),
+      code: lambda.Code.fromInline(`
+exports.handler = async (event) => {
+  event.response.autoConfirmUser = true;
+  event.response.autoVerifyPhone = true;
+  return event;
+};`),
+    });
 
     const backendPath = path.join(__dirname, '../../backend/src');
     const nodeOptions = {
@@ -165,6 +313,7 @@ export class VaaniSetuStack extends cdk.Stack {
         DB_SECRET_ARN: dbCluster.secret!.secretArn,
         DB_NAME: 'vaanisetu',
         REGION: this.region,
+        NOTIFICATION_TOPIC_ARN: notificationTopic.topicArn,
       },
     };
 
@@ -212,6 +361,7 @@ export class VaaniSetuStack extends cdk.Stack {
       environment: {
         ...nodeOptions.environment,
         DOCUMENTS_BUCKET: documentsBucket.bucketName,
+        DOCUMENTS_TABLE: documentsTable.tableName,
       },
     });
 
@@ -232,6 +382,15 @@ export class VaaniSetuStack extends cdk.Stack {
     const documentStatusFn = new lambdaNode.NodejsFunction(this, 'DocumentStatusFunction', {
       ...nodeOptions,
       entry: path.join(backendPath, 'api/documents/status.ts'),
+      handler: 'handler',
+      environment: {
+        ...nodeOptions.environment,
+        DOCUMENTS_TABLE: documentsTable.tableName,
+      },
+    });
+    const documentListFn = new lambdaNode.NodejsFunction(this, 'DocumentListFunction', {
+      ...nodeOptions,
+      entry: path.join(backendPath, 'api/documents/list.ts'),
       handler: 'handler',
       environment: {
         ...nodeOptions.environment,
@@ -279,7 +438,7 @@ export class VaaniSetuStack extends cdk.Stack {
       defaultCorsPreflightOptions: {
         allowOrigins: apigateway.Cors.ALL_ORIGINS,
         allowMethods: apigateway.Cors.ALL_METHODS,
-        allowHeaders: ['Content-Type', 'Authorization', 'X-Api-Key'],
+        allowHeaders: ['Content-Type', 'Authorization', 'X-Api-Key', 'X-User-Id'],
       },
     });
 
@@ -293,6 +452,7 @@ export class VaaniSetuStack extends cdk.Stack {
     const documentsResource = api.root.addResource('documents');
     const documentUploadResource = documentsResource.addResource('upload');
     documentUploadResource.addMethod('POST', new apigateway.LambdaIntegration(documentUploadFn));
+    documentsResource.addMethod('GET', new apigateway.LambdaIntegration(documentListFn));
 
     const applicationsResource = api.root.addResource('applications');
     applicationsResource.addMethod('GET', new apigateway.LambdaIntegration(applicationListFn));
@@ -308,8 +468,21 @@ export class VaaniSetuStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(30),
       memorySize: 512,
     });
-    const voiceResource = api.root.addResource('voice').addResource('query');
+    const voiceTranscribeFn = new lambdaNode.NodejsFunction(this, 'VoiceTranscribeFunction', {
+      ...nodeOptions,
+      entry: path.join(backendPath, 'api/voice/transcribe.ts'),
+      handler: 'handler',
+      timeout: cdk.Duration.seconds(90),
+      memorySize: 1024,
+      environment: {
+        ...nodeOptions.environment,
+        DOCUMENTS_BUCKET: documentsBucket.bucketName,
+      },
+    });
+    const voiceBaseResource = api.root.addResource('voice');
+    const voiceResource = voiceBaseResource.addResource('query');
     voiceResource.addMethod('POST', new apigateway.LambdaIntegration(voiceQueryFn));
+    voiceBaseResource.addResource('transcribe').addMethod('POST', new apigateway.LambdaIntegration(voiceTranscribeFn));
 
     const jobsListFn = new lambdaNode.NodejsFunction(this, 'JobsListFunction', {
       ...nodeOptions,
@@ -362,10 +535,7 @@ export class VaaniSetuStack extends cdk.Stack {
     });
     api.root.addResource('health').addMethod('GET', new apigateway.LambdaIntegration(healthFn));
 
-    new sns.Topic(this, 'NotificationTopic', {
-      topicName: 'vaanisetu-notifications',
-      displayName: 'VaaniSetu User Notifications',
-    });
+    notificationTopic.grantPublish(lambdaExecutionRole);
 
     const userPool = new cognito.UserPool(this, 'VaaniSetuUserPool', {
       userPoolName: 'vaanisetu-users',
@@ -387,6 +557,12 @@ export class VaaniSetuStack extends cdk.Stack {
       },
       accountRecovery: cognito.AccountRecovery.PHONE_ONLY_WITHOUT_MFA,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
+      lambdaTriggers: {
+        preSignUp: preSignUpFn,
+        defineAuthChallenge: defineAuthChallengeFn,
+        createAuthChallenge: createAuthChallengeFn,
+        verifyAuthChallengeResponse: verifyAuthChallengeResponseFn,
+      },
     });
 
     const userPoolClient = userPool.addClient('VaaniSetuUserPoolClient', {
@@ -410,9 +586,11 @@ export class VaaniSetuStack extends cdk.Stack {
       documentUploadFn,
       documentProcessFn,
       documentStatusFn,
+      documentListFn,
       applicationListFn,
       applicationCreateFn,
       voiceQueryFn,
+      voiceTranscribeFn,
       jobsListFn,
       jobsMatchFn,
       userProfileFn,
@@ -498,6 +676,11 @@ export class VaaniSetuStack extends cdk.Stack {
       value: userPoolClient.userPoolClientId,
       description: 'Cognito User Pool Client ID',
       exportName: 'VaaniSetuUserPoolClientId',
+    });
+    new cdk.CfnOutput(this, 'NotificationTopicArn', {
+      value: notificationTopic.topicArn,
+      description: 'SNS Topic ARN for user notifications',
+      exportName: 'VaaniSetuNotificationTopicArn',
     });
   }
 }
