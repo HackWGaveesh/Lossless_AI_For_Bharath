@@ -447,7 +447,7 @@ export default function EligibilityCalculator() {
             {t('eligibility.next')}
           </Button>
         ) : (
-          <Button onClick={handleSubmit} disabled={loading}>
+          <Button onClick={handleSubmit} disabled={loading || !canProceedStep4}>
             {t('eligibility.calculate')}
           </Button>
         )}

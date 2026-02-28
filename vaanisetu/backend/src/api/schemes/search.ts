@@ -4,7 +4,13 @@ import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data
 import { logger } from '../../utils/logger.js';
 import { sendSuccessResponse, sendErrorResponse } from '../../utils/responses.js';
 
-const bedrockAgent = new BedrockAgentRuntimeClient({ region: process.env.REGION });
+const bedrockAgent = new BedrockAgentRuntimeClient({
+  region: 'us-east-1',
+  token: process.env.AWS_BEARER_TOKEN_BEDROCK ? {
+    token: process.env.AWS_BEARER_TOKEN_BEDROCK,
+    expiration: new Date(Date.now() + 3600000)
+  } : undefined
+} as any);
 const rds = new RDSDataClient({ region: process.env.REGION });
 
 interface UserProfile {
@@ -51,9 +57,33 @@ export const handler: APIGatewayProxyHandler = async (event) => {
 
     const schemeIds = extractSchemeIds(responseText);
 
-    const schemes = schemeIds.length > 0
-      ? await fetchSchemeDetails(schemeIds)
-      : await fetchAllSchemes(10);
+    let schemes: SchemeRow[] = [];
+    try {
+      schemes = schemeIds.length > 0
+        ? await fetchSchemeDetails(schemeIds)
+        : await fetchAllSchemes(10);
+    } catch (err) {
+      logger.warn('RDS failed during search, using local JSON fallback', { err });
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const dataPath = path.resolve(process.cwd(), '../data/schemes/central-schemes.json');
+      const rawData = await fs.readFile(dataPath, 'utf-8');
+      const seedData = JSON.parse(rawData);
+
+      const allSeedSchemes = seedData.map((s: any) => ({
+        schemeId: s.scheme_id,
+        nameEn: s.name_en,
+        description: s.description,
+        eligibilityCriteria: s.eligibility_criteria,
+        benefitAmountMax: s.benefit_amount_max ?? 0
+      }));
+
+      if (schemeIds.length > 0) {
+        schemes = allSeedSchemes.filter((s: any) => schemeIds.includes(s.schemeId));
+      } else {
+        schemes = allSeedSchemes.slice(0, 10);
+      }
+    }
 
     const profile = userProfile || {};
     const rankedSchemes = schemes
@@ -65,7 +95,7 @@ export const handler: APIGatewayProxyHandler = async (event) => {
 
     return sendSuccessResponse({
       schemes: rankedSchemes.slice(0, 10),
-      agentInsights: responseText || 'Scheme list from database.',
+      agentInsights: responseText || 'Scheme list from database fallback.',
     });
   } catch (error) {
     logger.error('Error searching schemes', { error });

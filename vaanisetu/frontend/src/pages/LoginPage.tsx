@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import Button from '../components/Common/Button';
@@ -16,6 +16,32 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [resendTimer, setResendTimer] = useState(0);
+  const [showDevBypassForError, setShowDevBypassForError] = useState(false);
+  const showDevBypass = import.meta.env.DEV || !import.meta.env.VITE_USER_POOL_ID || showDevBypassForError;
+  const resendIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const startResendTimer = (seconds: number) => {
+    setResendTimer(seconds);
+    if (resendIntervalRef.current) clearInterval(resendIntervalRef.current);
+    resendIntervalRef.current = setInterval(() => {
+      setResendTimer((prev) => {
+        if (prev <= 1) {
+          if (resendIntervalRef.current) {
+            clearInterval(resendIntervalRef.current);
+            resendIntervalRef.current = null;
+          }
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (resendIntervalRef.current) clearInterval(resendIntervalRef.current);
+    };
+  }, []);
 
   const handleSendOTP = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -29,19 +55,46 @@ export default function LoginPage() {
     try {
       await sendOtp('+91' + digits);
       setStep('otp');
-      setResendTimer(120);
-      const interval = setInterval(() => {
-        setResendTimer((prev) => (prev <= 1 ? (clearInterval(interval), 0) : prev - 1));
-      }, 1000);
+      startResendTimer(120);
     } catch (err: unknown) {
-      const raw = err instanceof Error ? err.message : String(err ?? t('auth.otp_error'));
+      const errAny = err as { name?: string; message?: string } | null;
+      if (!import.meta.env.VITE_USER_POOL_ID) {
+        setError('Cognito not configured. Use the Dev bypass below.');
+        return;
+      }
+      const raw = errAny?.message ?? (err instanceof Error ? err.message : String(err ?? t('auth.otp_error')));
+      const isCustomAuthNotConfigured = errAny?.message?.includes('Custom auth lambda trigger');
       const message =
-        err && typeof err === 'object' && 'name' in err && (err as { name: string }).name === 'UserNotFoundException'
+        errAny?.name === 'UserNotFoundException'
           ? t('auth.phone_not_registered')
-          : /password|signin|required/i.test(raw)
-            ? t('auth.send_otp_error')
-            : raw;
+          : isCustomAuthNotConfigured
+            ? 'Auth service not fully configured. Use the Dev login button below to continue.'
+            : /password|signin|required/i.test(raw)
+              ? t('auth.send_otp_error')
+              : raw;
       setError(message);
+      if (isCustomAuthNotConfigured) setShowDevBypassForError(true);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResendOTP = async () => {
+    if (resendTimer > 0 || loading) return;
+    setError('');
+    const digits = phone.replace(/\D/g, '').slice(-10);
+    if (digits.length !== 10) {
+      setError(t('auth.phone_error'));
+      setStep('phone');
+      return;
+    }
+    setLoading(true);
+    try {
+      await sendOtp('+91' + digits);
+      startResendTimer(120);
+    } catch (err: unknown) {
+      const raw = err instanceof Error ? err.message : String(err ?? t('auth.send_otp_error'));
+      setError(raw || t('auth.send_otp_error'));
     } finally {
       setLoading(false);
     }
@@ -104,6 +157,7 @@ export default function LoginPage() {
                 {t('auth.login_title')}
               </h1>
               <p className="text-text-secondary text-sm">{t('auth.phone_placeholder')}</p>
+              <p className="text-text-muted text-xs mt-1">New user? Same screen — enter your number and we’ll send an OTP.</p>
               <Input
                 label={t('auth.phone_label')}
                 type="tel"
@@ -151,7 +205,7 @@ export default function LoginPage() {
               {resendTimer > 0 ? (
                 <p className="text-text-muted text-sm text-center">{t('auth.resend_otp')} {resendTimer}s</p>
               ) : (
-                <button type="button" className="text-primary-500 text-sm w-full text-center" onClick={() => setResendTimer(120)}>
+                <button type="button" className="text-primary-500 text-sm w-full text-center" onClick={handleResendOTP}>
                   {t('auth.resend_otp')}
                 </button>
               )}
@@ -162,7 +216,7 @@ export default function LoginPage() {
             </form>
           )}
 
-          {import.meta.env.DEV && (
+          {showDevBypass && (
             <div className="mt-8 pt-6 border-t border-surface-border">
               <button
                 type="button"

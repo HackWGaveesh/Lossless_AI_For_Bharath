@@ -1,8 +1,8 @@
 import type { APIGatewayProxyHandler } from 'aws-lambda';
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
-import { DynamoDBClient, ListTablesCommand } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient, DescribeTableCommand } from '@aws-sdk/client-dynamodb';
 import { logger } from '../utils/logger.js';
-import { sendSuccessResponse, sendErrorResponse } from '../utils/responses.js';
+import { sendSuccessResponse } from '../utils/responses.js';
 
 const rds = new RDSDataClient({ region: process.env.REGION });
 const dynamo = new DynamoDBClient({ region: process.env.REGION });
@@ -29,7 +29,9 @@ export const handler: APIGatewayProxyHandler = async () => {
 
   try {
     const ddbStart = Date.now();
-    await dynamo.send(new ListTablesCommand({ Limit: 1 }));
+    const tableName = process.env.USERS_TABLE ?? process.env.APPLICATIONS_TABLE;
+    if (!tableName) throw new Error('No DynamoDB table configured for health check');
+    await dynamo.send(new DescribeTableCommand({ TableName: tableName }));
     checks.dynamodb = { status: 'up', latencyMs: Date.now() - ddbStart };
   } catch (e) {
     checks.dynamodb = { status: 'down', error: String(e) };
@@ -38,8 +40,5 @@ export const handler: APIGatewayProxyHandler = async () => {
 
   logger.info('Health check', { overall, checks });
 
-  if (overall === 'ok') {
-    return sendSuccessResponse({ status: 'ok', service: 'vaanisetu-backend', checks });
-  }
-  return sendErrorResponse(503, 'Service degraded', { status: overall, checks });
+  return sendSuccessResponse({ status: overall, service: 'vaanisetu-backend', checks });
 };

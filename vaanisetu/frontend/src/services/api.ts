@@ -116,10 +116,7 @@ export async function fetchApplications(userId?: string): Promise<ApplicationIte
     });
     return data.data?.applications ?? [];
   } catch {
-    return [
-      { application_id: 'APP-1', scheme_id: 'MUDRA-SHISHU', status: 'pending', created_at: new Date().toISOString() },
-      { application_id: 'APP-2', scheme_id: 'PM-KISAN', status: 'approved', created_at: new Date().toISOString() },
-    ];
+    return [];
   }
 }
 
@@ -147,7 +144,17 @@ export async function createApplication(body: { userId: string; schemeId: string
 export async function voiceQuery(params: { transcript: string; language?: string; sessionContext?: { role: string; content: string }[] }) {
   const { data } = await api.post<{ success: boolean; data: { responseText: string; language: string } }>(
     '/voice/query',
-    params
+    params,
+    { timeout: 60000 }
+  );
+  return data;
+}
+
+export async function transcribeVoice(params: { audioBase64: string; mimeType?: string; language?: string }) {
+  const { data } = await api.post<{ success: boolean; data: { transcript: string; language?: string } }>(
+    '/voice/transcribe',
+    params,
+    { timeout: 120000 }
   );
   return data;
 }
@@ -189,8 +196,15 @@ export async function updateProfile(profile: Record<string, unknown>) {
 }
 
 export async function getDocumentStatus(documentId: string) {
-  const { data } = await api.get<{ success: boolean; data: { status: string; structured_data?: Record<string, unknown>; processed_at?: string } }>(
+  const { data } = await api.get<{ success: boolean; data: { status: string; structured_data?: Record<string, unknown>; processed_at?: string; error_message?: string } }>(
     `/documents/${documentId}/status`
   );
+  return data;
+}
+
+export async function fetchDocuments(userId?: string) {
+  const { data } = await api.get<{ success: boolean; data: { documents: any[] } }>('/documents', {
+    params: userId ? { userId } : {},
+  });
   return data;
 }

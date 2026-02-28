@@ -50,6 +50,7 @@ const dbClusterArn = outputs.DatabaseClusterArn || '';
 const dbSecretArn = outputs.DatabaseSecretArn || '';
 const userPoolId = outputs.UserPoolId || '';
 const userPoolClientId = outputs.UserPoolClientId || '';
+const notificationTopicArn = outputs.NotificationTopicArn || '';
 
 // Root .env: merge CDK keys into existing .env or create
 const rootEnvPath = path.join(rootDir, '.env');
@@ -57,6 +58,7 @@ const rootUpdates = {
   DB_CLUSTER_ARN: dbClusterArn,
   DB_SECRET_ARN: dbSecretArn,
   DOCUMENTS_BUCKET: documentsBucket,
+  NOTIFICATION_TOPIC_ARN: notificationTopicArn,
   AWS_REGION: region,
 };
 let existingRoot = fs.existsSync(rootEnvPath) ? fs.readFileSync(rootEnvPath, 'utf8') : '';

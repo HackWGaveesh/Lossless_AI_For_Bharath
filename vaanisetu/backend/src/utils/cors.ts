@@ -5,6 +5,6 @@ export function corsHeaders(): Record<string, string> {
     'Content-Type': 'application/json',
     'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
     'Access-Control-Allow-Credentials': 'true',
-    'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-Api-Key',
+    'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-Api-Key,X-User-Id',
   };
 }

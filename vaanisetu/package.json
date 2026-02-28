@@ -3,17 +3,29 @@
   "version": "1.0.0",
   "description": "Voice-first AI platform for rural India",
   "private": true,
-  "workspaces": ["frontend", "backend", "infrastructure"],
+  "workspaces": [
+    "frontend",
+    "backend",
+    "infrastructure"
+  ],
   "scripts": {
     "setup": "bash scripts/setup.sh",
-    "dev": "npm run dev --workspace=frontend & npm run dev --workspace=backend",
-    "build": "npm run build --workspace=frontend && npm run build --workspace=backend",
+    "dev": "concurrently \"npm run dev --workspace=frontend\" \"npm run dev --workspace=backend\"",
+    "build": "npm run build --workspace=backend && npm run build --workspace=frontend && npm run build --workspace=infrastructure",
     "deploy": "bash scripts/deploy.sh",
-    "test": "bash scripts/test.sh",
-    "seed": "bash scripts/seed-data.sh"
+    "test": "npm run test --workspace=backend",
+    "seed": "bash scripts/seed-data.sh",
+    "seed:node": "node scripts/seed-data.js"
   },
   "engines": {
     "node": ">=20.0.0",
     "npm": ">=10.0.0"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-rds-data": "^3.515.0",
+    "concurrently": "^8.2.2"
+  },
+  "dependencies": {
+    "@aws-sdk/client-rekognition": "^3.1000.0"
   }
 }

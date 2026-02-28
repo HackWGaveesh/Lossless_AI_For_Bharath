@@ -116,11 +116,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const sendOtp = useCallback(async (phoneNumber: string) => {
+    if (!import.meta.env.VITE_USER_POOL_ID) {
+      throw new Error('Cognito not configured. Use Dev login for demo.');
+    }
     const normalized = phoneNumber.startsWith('+') ? phoneNumber : `+91${phoneNumber.replace(/\D/g, '').slice(-10)}`;
-    await signIn({
-      username: normalized,
-      options: { authFlowType: 'CUSTOM_WITHOUT_SRP' },
-    });
+    try {
+      await signIn({
+        username: normalized,
+        options: { authFlowType: 'CUSTOM_WITHOUT_SRP' },
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err ?? '');
+      if (/already a signed in user/i.test(message)) {
+        await signOut();
+        await signIn({
+          username: normalized,
+          options: { authFlowType: 'CUSTOM_WITHOUT_SRP' },
+        });
+        return;
+      }
+      throw err;
+    }
   }, []);
 
   const verifyOtp = useCallback(async (otp: string) => {

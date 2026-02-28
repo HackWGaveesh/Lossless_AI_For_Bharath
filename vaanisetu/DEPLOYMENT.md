@@ -68,16 +68,23 @@ node scripts/write-env-from-cdk.js
 
 This updates root `.env` and writes `frontend/.env` (VITE_API_URL, VITE_USER_POOL_ID, VITE_USER_POOL_CLIENT_ID, VITE_AWS_REGION).
 
-### Step 4: Seed the database
+### Step 4: Seed the database (PowerShell)
 
-Load `.env` again, then run the seed script. In **Git Bash** or **WSL** (from repo root):
+From the **vaanisetu** folder (same folder that has `.env` and `scripts/`):
 
-```bash
-export $(cat .env | grep -v '^#' | xargs)
-bash scripts/seed-data.sh
+```powershell
+cd C:\Users\gavee\Downloads\AI_For_Bharath\vaanisetu
+node scripts/seed-data.js
 ```
 
-If you only have PowerShell, you can run the Node part of the seed manually; the script uses `aws rds-data` and Node. Or install Git Bash and run the above.
+Or use the npm script:
+
+```powershell
+cd C:\Users\gavee\Downloads\AI_For_Bharath\vaanisetu
+npm run seed:node
+```
+
+The script reads `DB_CLUSTER_ARN` and `DB_SECRET_ARN` from `.env` (filled by Step 3). No bash or Git Bash required.
 
 ### Step 5: Build and deploy frontend
 
@@ -103,5 +110,6 @@ After deploy, the live app URL is the **CloudFront URL** from the stack output (
 | `scripts/cleanup-leftover-resources.ps1` | Deletes failed stack (if any), S3 bucket, and DynamoDB tables so deploy can run clean. Run when you see "already exists" errors. |
 | `scripts/write-env-from-cdk.js` | Reads CDK stack outputs and writes root `.env` + `frontend/.env`. |
 | `scripts/deploy-frontend.js` | Builds frontend, uploads to S3, invalidates CloudFront. |
-| `scripts/seed-data.sh` | Seeds schemes and jobs (requires DB_CLUSTER_ARN, DB_SECRET_ARN in `.env`). |
+| `scripts/seed-data.sh` | Seeds via bash (needs Git Bash; use `scripts/seed-data.js` on Windows). |
+| `scripts/seed-data.js` | Seeds schemes and jobs from PowerShell: `node scripts/seed-data.js` (uses `.env`). |
 | `scripts/deploy.sh` | CDK bootstrap + deploy only (no seed, no frontend upload). |

@@ -8,25 +8,17 @@ const dynamo = new DynamoDBClient({ region: process.env.REGION });
 const doc = DynamoDBDocumentClient.from(dynamo);
 
 const USERS_TABLE = process.env.USERS_TABLE ?? 'vaanisetu-users';
-const NOTIFICATION_TOPIC_ARN = process.env.NOTIFICATION_TOPIC_ARN;
 
 export async function sendSMS(phone: string, message: string): Promise<boolean> {
-  if (!NOTIFICATION_TOPIC_ARN) {
-    logger.warn('NOTIFICATION_TOPIC_ARN not set, skipping SMS');
-    return false;
-  }
+  const target = phone.startsWith('+') ? phone : `+91${phone.replace(/\D/g, '').slice(-10)}`;
   try {
     await sns.send(
       new PublishCommand({
-        TopicArn: NOTIFICATION_TOPIC_ARN,
+        PhoneNumber: target,
         Message: message,
-        MessageAttributes: {
-          phone: { DataType: 'String', StringValue: phone },
-          type: { DataType: 'String', StringValue: 'sms' },
-        },
       })
     );
-    logger.info('SMS sent', { phone: phone.slice(-4) });
+    logger.info('SMS sent', { phone: target.slice(-4) });
     return true;
   } catch (error) {
     logger.error('SMS send failed', { error });

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "🌱 Seeding VaaniSetu databases..."
+echo "ðŸŒ± Seeding VaaniSetu databases..."
 
 if [ -f ".env" ]; then
   set -a
@@ -13,15 +13,15 @@ DB_CLUSTER_ARN="${DB_CLUSTER_ARN:-}"
 DB_SECRET_ARN="${DB_SECRET_ARN:-}"
 
 if [ -z "$DB_CLUSTER_ARN" ] || [ -z "$DB_SECRET_ARN" ]; then
-  echo "⚠️  DB_CLUSTER_ARN and DB_SECRET_ARN must be set (e.g. from CDK outputs or .env)"
+  echo "âš ï¸  DB_CLUSTER_ARN and DB_SECRET_ARN must be set (e.g. from CDK outputs or .env)"
   echo "   After CDK deploy, run: aws cloudformation describe-stacks --stack-name VaaniSetuStack --query 'Stacks[0].Outputs'"
   exit 1
 fi
 
-echo "📋 Database ARN: $DB_CLUSTER_ARN"
-echo "🔐 Secret ARN: $DB_SECRET_ARN"
+echo "ðŸ“‹ Database ARN: $DB_CLUSTER_ARN"
+echo "ðŸ” Secret ARN: $DB_SECRET_ARN"
 
-echo "📊 Creating schemes table (if not exists)..."
+echo "ðŸ“Š Creating schemes table (if not exists)..."
 aws rds-data execute-statement \
   --resource-arn "$DB_CLUSTER_ARN" \
   --secret-arn "$DB_SECRET_ARN" \
@@ -47,7 +47,7 @@ aws rds-data execute-statement \
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )" 2>/dev/null || true
 
-echo "💾 Inserting schemes from data/schemes/central-schemes.json..."
+echo "ðŸ’¾ Inserting schemes from data/schemes/central-schemes.json..."
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 node -e "
@@ -94,14 +94,14 @@ async function insertSchemes() {
         { name: 'is_active', value: { booleanValue: scheme.is_active !== false } }
       ]
     }));
-    console.log('✅ Inserted scheme: ' + scheme.name_en);
+    console.log('âœ… Inserted scheme: ' + scheme.name_en);
   }
 }
 
-insertSchemes().then(() => console.log('✅ All schemes inserted!')).catch(e => { console.error(e); process.exit(1); });
+insertSchemes().then(() => console.log('âœ… All schemes inserted!')).catch(e => { console.error(e); process.exit(1); });
 "
 
-echo "📊 Creating jobs table (if not exists)..."
+echo "ðŸ“Š Creating jobs table (if not exists)..."
 aws rds-data execute-statement \
   --resource-arn "$DB_CLUSTER_ARN" \
   --secret-arn "$DB_SECRET_ARN" \
@@ -120,7 +120,7 @@ aws rds-data execute-statement \
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )" 2>/dev/null || true
 
-echo "💾 Inserting jobs from data/jobs/sample-jobs.json..."
+echo "ðŸ’¾ Inserting jobs from data/jobs/sample-jobs.json..."
 node -e "
 const fs = require('fs');
 const path = require('path');
@@ -150,10 +150,10 @@ async function insertJobs() {
         { name: 'description', value: { stringValue: (j.description || '') } }
       ]
     }));
-    console.log('✅ Inserted job: ' + j.title);
+    console.log('âœ… Inserted job: ' + j.title);
   }
 }
-insertJobs().then(() => console.log('✅ All jobs inserted!')).catch(e => { console.error(e); process.exit(1); });
+insertJobs().then(() => console.log('âœ… All jobs inserted!')).catch(e => { console.error(e); process.exit(1); });
 "
 
-echo "✅ Database seeding complete!"
+echo "âœ… Database seeding complete!"

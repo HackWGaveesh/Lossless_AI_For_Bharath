@@ -45,16 +45,16 @@ export default function ProfilePage() {
         const p = (res?.data?.profile ?? {}) as Record<string, unknown>;
         setForm({
           fullName: (p.fullName ?? p.name ?? user?.name ?? '') as string,
-          phone: (p.phone ?? p.phoneNumber ?? user?.phone ?? '') as string,
+          phone: (p.phone ?? user?.phone ?? '') as string,
           age: (p.age as number) ?? '',
           gender: (p.gender as string) ?? '',
           state: (p.state as string) ?? '',
           district: (p.district as string) ?? '',
-          preferredLanguage: (p.preferredLanguage as string) ?? 'en',
+          preferredLanguage: ((p.preferredLanguage ?? p.preferred_language) as string) ?? 'en',
           occupation: (p.occupation as string) ?? '',
-          annualIncome: (p.annualIncome as number) ?? '',
-          casteCategory: (p.casteCategory as string) ?? '',
-          bplCardholder: !!p.bplCardholder,
+          annualIncome: ((p.annualIncome ?? p.annual_income) as number) ?? '',
+          casteCategory: ((p.casteCategory ?? p.caste_category) as string) ?? '',
+          bplCardholder: !!(p.bplCardholder ?? p.bpl_cardholder),
         });
       })
       .catch(() => {})

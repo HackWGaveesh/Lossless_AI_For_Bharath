@@ -31,28 +31,51 @@ export const handler: APIGatewayProxyHandler = async (event) => {
       { name: 'offset', value: { longValue: parseInt(offset, 10) || 0 } }
     );
 
-    const result = await rds.send(
-      new ExecuteStatementCommand({
-        resourceArn: process.env.DB_CLUSTER_ARN!,
-        secretArn: process.env.DB_SECRET_ARN!,
-        database: process.env.DB_NAME!,
-        sql,
-        parameters: parameters as never,
-      })
-    );
+    let jobs = [];
+    try {
+      const result = await rds.send(
+        new ExecuteStatementCommand({
+          resourceArn: process.env.DB_CLUSTER_ARN!,
+          secretArn: process.env.DB_SECRET_ARN!,
+          database: process.env.DB_NAME!,
+          sql,
+          parameters: parameters as never,
+        })
+      );
 
-    const jobs = (result.records ?? []).map((row) => ({
-      jobId: row[0]?.stringValue,
-      title: row[1]?.stringValue,
-      company: row[2]?.stringValue,
-      state: row[3]?.stringValue,
-      district: row[4]?.stringValue,
-      jobType: row[5]?.stringValue,
-      salaryMin: row[6]?.longValue ?? row[6]?.doubleValue,
-      salaryMax: row[7]?.longValue ?? row[7]?.doubleValue,
-      skills: safeJsonParse(row[8]?.stringValue),
-      createdAt: row[9]?.stringValue,
-    }));
+      jobs = (result.records ?? []).map((row) => ({
+        jobId: row[0]?.stringValue,
+        title: row[1]?.stringValue,
+        company: row[2]?.stringValue,
+        state: row[3]?.stringValue,
+        district: row[4]?.stringValue,
+        jobType: row[5]?.stringValue,
+        salaryMin: row[6]?.longValue ?? row[6]?.doubleValue,
+        salaryMax: row[7]?.longValue ?? row[7]?.doubleValue,
+        skills: safeJsonParse(row[8]?.stringValue),
+        createdAt: row[9]?.stringValue,
+      }));
+    } catch (dbError) {
+      logger.warn('RDS failed, using local JSON fallback for jobs', { dbError });
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const dataPath = path.resolve(process.cwd(), '../data/jobs/sample-jobs.json');
+      const rawData = await fs.readFile(dataPath, 'utf-8');
+      const seedData = JSON.parse(rawData);
+
+      jobs = seedData.map((j: any) => ({
+        jobId: j.job_id,
+        title: j.title,
+        company: j.company,
+        state: j.state,
+        district: j.district,
+        jobType: j.job_type,
+        salaryMin: j.salary_min,
+        salaryMax: j.salary_max,
+        skills: j.skills,
+        createdAt: j.created_at
+      }));
+    }
 
     return sendSuccessResponse({ jobs, total: jobs.length });
   } catch (error) {

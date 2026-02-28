@@ -30,23 +30,43 @@ export const handler: APIGatewayProxyHandler = async (event) => {
       { name: 'offset', value: { longValue: parseInt(offset, 10) || 0 } }
     );
 
-    const result = await rds.send(new ExecuteStatementCommand({
-      resourceArn: process.env.DB_CLUSTER_ARN!,
-      secretArn: process.env.DB_SECRET_ARN!,
-      database: process.env.DB_NAME!,
-      sql,
-      parameters: parameters as never,
-    }));
+    let schemes = [];
+    try {
+      const result = await rds.send(new ExecuteStatementCommand({
+        resourceArn: process.env.DB_CLUSTER_ARN!,
+        secretArn: process.env.DB_SECRET_ARN!,
+        database: process.env.DB_NAME!,
+        sql,
+        parameters: parameters as never,
+      }));
 
-    const schemes = (result.records ?? []).map((record) => ({
-      schemeId: record[0]?.stringValue,
-      nameEn: record[1]?.stringValue,
-      nameHi: record[2]?.stringValue,
-      description: record[3]?.stringValue,
-      benefitAmountMin: record[4]?.longValue ?? record[4]?.doubleValue,
-      benefitAmountMax: record[5]?.longValue ?? record[5]?.doubleValue,
-      eligibilityCriteria: safeJsonParse(record[6]?.stringValue),
-    }));
+      schemes = (result.records ?? []).map((record) => ({
+        schemeId: record[0]?.stringValue,
+        nameEn: record[1]?.stringValue,
+        nameHi: record[2]?.stringValue,
+        description: record[3]?.stringValue,
+        benefitAmountMin: record[4]?.longValue ?? record[4]?.doubleValue,
+        benefitAmountMax: record[5]?.longValue ?? record[5]?.doubleValue,
+        eligibilityCriteria: safeJsonParse(record[6]?.stringValue),
+      }));
+    } catch (dbError) {
+      logger.warn('RDS failed, using local JSON fallback for schemes', { dbError });
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const dataPath = path.resolve(process.cwd(), '../data/schemes/central-schemes.json');
+      const rawData = await fs.readFile(dataPath, 'utf-8');
+      const seedData = JSON.parse(rawData);
+
+      schemes = seedData.map((s: any) => ({
+        schemeId: s.scheme_id,
+        nameEn: s.name_en,
+        nameHi: s.name_hi,
+        description: s.description,
+        benefitAmountMin: s.benefit_amount_min,
+        benefitAmountMax: s.benefit_amount_max,
+        eligibilityCriteria: s.eligibility_criteria
+      }));
+    }
 
     return sendSuccessResponse({ schemes, total: schemes.length });
   } catch (error) {

@@ -6,7 +6,7 @@ import { useLanguage } from '../contexts/LanguageContext';
 
 export default function ApplicationsPage() {
   const { t } = useLanguage();
-  const { data: applications, isLoading } = useQuery('applications', () => fetchApplications());
+  const { data: applications = [], isLoading } = useQuery('applications', () => fetchApplications());
 
   return (
     <div className="space-y-6">
@@ -45,7 +45,7 @@ export default function ApplicationsPage() {
       {isLoading ? (
         <Spinner />
       ) : (
-        <ApplicationList applications={Array.isArray(applications) ? applications : []} />
+        <ApplicationList applications={applications} />
       )}
     </div>
   );

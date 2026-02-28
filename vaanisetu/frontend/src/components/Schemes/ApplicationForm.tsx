@@ -39,14 +39,14 @@ export default function ApplicationForm({ schemeId, schemeName, documentsRequire
         setProfile(p);
         setForm({
           fullName: (p.fullName ?? p.name ?? '') as string,
-          phone: (p.phone ?? p.phoneNumber ?? '') as string,
+          phone: (p.phone ?? '') as string,
           state: (p.state ?? '') as string,
           district: (p.district ?? '') as string,
           pincode: (p.pincode ?? '') as string,
           address: (p.address ?? '') as string,
         });
       })
-      .catch(() => {})
+      .catch(() => { })
       .finally(() => setLoadingProfile(false));
   }, []);
 

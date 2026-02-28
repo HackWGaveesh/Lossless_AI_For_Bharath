@@ -32,14 +32,14 @@ export default function DashboardPage() {
     }).catch(() => {
       if (!cancelled) setHealth(null);
     });
-    const t = setInterval(() => {
+    const intervalId = setInterval(() => {
       api.get<{ data?: HealthStatus }>('/health').then((res) => {
         if (!cancelled) setHealth(res.data?.data ?? null);
       }).catch(() => {
         if (!cancelled) setHealth(null);
       });
     }, 60000);
-    return () => { cancelled = true; clearInterval(t); };
+    return () => { cancelled = true; clearInterval(intervalId); };
   }, []);
 
   const appList = Array.isArray(applications) ? applications : [];

@@ -15,16 +15,16 @@ export default function LanguageSwitcher() {
   const { language, setLanguage } = useLanguage();
 
   return (
-    <div className="flex rounded-lg border border-gray-200 overflow-hidden">
+    <div className="flex flex-wrap gap-1">
       {languages.map(({ code, label }) => (
         <button
           key={code}
           onClick={() => setLanguage(code)}
           className={clsx(
-            'px-3 py-1.5 text-sm font-medium transition-colors rounded-md',
+            'px-2.5 py-1 text-xs font-medium transition-colors rounded-md border',
             language === code
-              ? 'bg-primary-500 text-white'
-              : 'bg-surface-card text-text-secondary hover:bg-surface-elevated border border-surface-border'
+              ? 'bg-primary-500 text-white border-primary-500'
+              : 'bg-surface-card text-text-secondary hover:bg-surface-elevated border-surface-border'
           )}
         >
           {label}
