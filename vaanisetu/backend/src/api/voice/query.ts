@@ -17,10 +17,12 @@ export const handler: APIGatewayProxyHandler = async (event) => {
       transcript,
       language = 'hi-IN',
       sessionContext = [],
+      sessionId = userId || 'anonymous',
     } = body as {
       transcript?: string;
       language?: string;
       sessionContext?: { role: string; content: string }[];
+      sessionId?: string;
     };
 
     if (!transcript?.trim()) {
@@ -47,7 +49,7 @@ Respond in ${langLabel}. Max 3 concise sentences.`;
         const cmd = new InvokeAgentCommand({
           agentId,
           agentAliasId,
-          sessionId: `${userId.slice(0, 20)}-${Date.now()}`,
+          sessionId: sessionId.slice(0, 50),
           inputText: enriched,
           enableTrace: true,
         });

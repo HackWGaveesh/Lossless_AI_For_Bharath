@@ -17,7 +17,7 @@ export default function VoiceWidget() {
   const { language, t } = useLanguage();
   const langCode = LANG_MAP[language] ?? 'hi-IN';
 
-  const [isOpen, setIsOpen] = useState(false);
+  const [isOpen, setIsOpen] = useState(true);
   const [isListening, setIsListening] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [transcript, setTranscript] = useState('');
@@ -76,6 +76,8 @@ export default function VoiceWidget() {
     }
   }, [langCode]);
 
+  const sessionIdRef = useRef(`vs-${Math.random().toString(36).substring(2, 10)}${Date.now()}`);
+
   const sendToBackend = async (text: string) => {
     if (!mountedRef.current || !text.trim()) return;
     setIsProcessing(true);
@@ -88,6 +90,7 @@ export default function VoiceWidget() {
         transcript: text,
         language: langCode,
         sessionContext: sessionContext.slice(-6),
+        sessionId: sessionIdRef.current,
       });
       if (!mountedRef.current) return;
 

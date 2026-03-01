@@ -751,12 +751,66 @@ const kn: TranslationMap = {
   'error.go_dashboard': 'ಡ್ಯಾಶ್‌ಬೋರ್ಡ್‌ಗೆ ಹೋಗಿ',
 };
 
+const ta: TranslationMap = {
+  'nav.dashboard': 'முகப்பு',
+  'nav.schemes': 'திட்டங்கள்',
+  'nav.applications': 'விண்ணப்பங்கள்',
+  'nav.documents': 'ஆவணங்கள்',
+  'nav.jobs': 'வேலைகள்',
+  'nav.agents': 'AI பாட்',
+  'dashboard.greeting': 'வரவேற்கிறோம்',
+  'schemes.title': 'அரசு திட்டங்கள்',
+  'voice.title': 'குரல் உதவியாளர்',
+  'voice.start': 'பேசத் தொடங்கு',
+  'voice.listening': 'கேட்கிறது...',
+  'voice.you_said': 'நீங்கள் கூறியது:',
+  'voice.ai_response': 'VaaniSetu:',
+  'common.search': 'தேடு',
+  'common.submit': 'சமர்ப்பி',
+};
+
+const te: TranslationMap = {
+  'nav.dashboard': 'డ్యాష్‌బోర్డ్',
+  'nav.schemes': 'పథకాలు',
+  'nav.applications': 'దరఖాస్తులు',
+  'nav.documents': 'పత్రాలు',
+  'nav.jobs': 'ఉద్యోగాలు',
+  'nav.agents': 'AI ఆర్కిటెక్చర్',
+  'dashboard.greeting': 'స్వాగతం',
+  'schemes.title': 'ప్రభుత్వ పథకాలు',
+  'voice.title': 'వాయిస్ అసిస్టెంట్',
+  'voice.start': 'మాట్లాడటం ప్రారంభించండి',
+  'voice.listening': 'వింటున్నది...',
+  'voice.you_said': 'మీరు చెప్పారు:',
+  'voice.ai_response': 'VaaniSetu:',
+  'common.search': 'శోధించండి',
+  'common.submit': 'లాగిన్ చేయండి',
+};
+
+const mr: TranslationMap = {
+  'nav.dashboard': 'डॅशबोर्ड',
+  'nav.schemes': 'योजना',
+  'nav.applications': 'अर्ज',
+  'nav.documents': 'कागदपत्रे',
+  'nav.jobs': 'नोकऱ्या',
+  'nav.agents': 'AI सहाय्यक',
+  'dashboard.greeting': 'स्वागत आहे',
+  'schemes.title': 'सरकारी योजना',
+  'voice.title': 'व्हॉइस असिस्टंट',
+  'voice.start': 'बोलण्यास सुरुवात करा',
+  'voice.listening': 'ऐकत आहे...',
+  'voice.you_said': 'तुम्ही म्हणालात:',
+  'voice.ai_response': 'VaaniSetu:',
+  'common.search': 'शोधा',
+  'common.submit': 'सबमिट करा',
+};
+
 export const translations: Record<Language, TranslationMap> = {
   en,
   hi,
-  ta: en,
-  te: en,
-  mr: en,
+  ta,
+  te,
+  mr,
   kn,
 };
 

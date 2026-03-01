@@ -141,7 +141,7 @@ export async function createApplication(body: { userId: string; schemeId: string
   return data;
 }
 
-export async function voiceQuery(params: { transcript: string; language?: string; sessionContext?: { role: string; content: string }[] }) {
+export async function voiceQuery(params: { transcript: string; language?: string; sessionContext?: { role: string; content: string }[]; sessionId?: string }) {
   const { data } = await api.post<{ success: boolean; data: { responseText: string; language: string } }>(
     '/voice/query',
     params,
