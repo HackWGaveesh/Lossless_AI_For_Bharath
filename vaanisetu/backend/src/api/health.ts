@@ -40,5 +40,16 @@ export const handler: APIGatewayProxyHandler = async () => {
 
   logger.info('Health check', { overall, checks });
 
-  return sendSuccessResponse({ status: overall, service: 'vaanisetu-backend', checks });
+  return sendSuccessResponse({
+    status: overall,
+    service: 'vaanisetu-backend',
+    checks,
+    bedrockAgentId: process.env.BEDROCK_AGENT_ID ? 'configured' : null,
+    bedrockAgentAlias: process.env.BEDROCK_AGENT_ALIAS_ID || 'TSTALIASID',
+    guardrailsEnabled: !!process.env.BEDROCK_GUARDRAIL_ID,
+    model: 'us.amazon.nova-pro-v1:0',
+    agentActions: ['getSchemesByProfile', 'createApplication', 'getApplicationStatus', 'getJobsByProfile'],
+    kycPipeline: '10-step: structural→textract→rekognition→novaProFraud',
+    awsServicesCount: 15,
+  });
 };

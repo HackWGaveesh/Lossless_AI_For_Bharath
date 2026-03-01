@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { Home, FileText, FolderOpen, Image, Briefcase } from 'lucide-react';
+import { Home, FileText, FolderOpen, Image, Bot } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useLanguage } from '../../contexts/LanguageContext';
 
@@ -8,7 +8,7 @@ const navRoutes = [
   { to: '/schemes', icon: FileText, key: 'nav.schemes' },
   { to: '/applications', icon: FolderOpen, key: 'nav.applications' },
   { to: '/documents', icon: Image, key: 'nav.documents' },
-  { to: '/jobs', icon: Briefcase, key: 'nav.jobs' },
+  { to: '/agents', icon: Bot, key: 'nav.agents' },
 ];
 
 export default function BottomNav() {

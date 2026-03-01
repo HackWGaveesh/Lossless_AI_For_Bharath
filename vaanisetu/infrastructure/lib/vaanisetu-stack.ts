@@ -178,6 +178,57 @@ export class VaaniSetuStack extends cdk.Stack {
     documentsBucket.grantReadWrite(lambdaExecutionRole);
     dbCluster.grantDataApiAccess(lambdaExecutionRole);
 
+    // Knowledge Base S3 bucket for Bedrock RAG
+    const kbBucket = new s3.Bucket(this, 'VaaniSetuKBBucket', {
+      bucketName: `vaanisetu-kb-${this.account}`,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.KMS,
+      encryptionKey: kmsKey,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+    });
+    kbBucket.grantReadWrite(lambdaExecutionRole);
+    new cdk.CfnOutput(this, 'KnowledgeBaseBucketName', {
+      value: kbBucket.bucketName,
+      description: 'S3 bucket for Bedrock Knowledge Base',
+    });
+
+    // IAM role for Bedrock Agent to call Lambda and access KB
+    const bedrockAgentRole = new iam.Role(this, 'BedrockAgentRole', {
+      roleName: `vaanisetu-bedrock-agent-${this.account}`,
+      assumedBy: new iam.ServicePrincipal('bedrock.amazonaws.com'),
+      inlinePolicies: {
+        BedrockAgentPolicy: new iam.PolicyDocument({
+          statements: [
+            new iam.PolicyStatement({
+              actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
+              resources: ['*'],
+            }),
+            new iam.PolicyStatement({
+              actions: ['s3:GetObject', 's3:ListBucket'],
+              resources: [kbBucket.bucketArn, `${kbBucket.bucketArn}/*`],
+            }),
+            new iam.PolicyStatement({
+              actions: ['bedrock:Retrieve', 'bedrock:RetrieveAndGenerate'],
+              resources: ['*'],
+            }),
+            new iam.PolicyStatement({
+              actions: ['lambda:InvokeFunction'],
+              resources: ['*'],
+            }),
+            new iam.PolicyStatement({
+              actions: ['aoss:APIAccessAll'],
+              resources: ['*'],
+            }),
+          ],
+        }),
+      },
+    });
+    new cdk.CfnOutput(this, 'BedrockAgentRoleArn', {
+      value: bedrockAgentRole.roleArn,
+      description: 'IAM role for Bedrock Agent',
+    });
+
     // SNS Topic for notifications (moved here so custom auth Lambda can reference it)
     const notificationTopic = new sns.Topic(this, 'NotificationTopic', {
       topicName: 'vaanisetu-notifications',
@@ -467,6 +518,12 @@ exports.handler = async (event) => {
       handler: 'handler',
       timeout: cdk.Duration.seconds(30),
       memorySize: 512,
+      environment: {
+        ...nodeOptions.environment,
+        BEDROCK_AGENT_ID: process.env.BEDROCK_AGENT_ID || '',
+        BEDROCK_AGENT_ALIAS_ID: process.env.BEDROCK_AGENT_ALIAS_ID || 'TSTALIASID',
+        BEDROCK_GUARDRAIL_ID: process.env.BEDROCK_GUARDRAIL_ID || '',
+      },
     });
     const voiceTranscribeFn = new lambdaNode.NodejsFunction(this, 'VoiceTranscribeFunction', {
       ...nodeOptions,
@@ -531,6 +588,9 @@ exports.handler = async (event) => {
         ...nodeOptions.environment,
         DB_CLUSTER_ARN: dbCluster.clusterArn,
         DB_SECRET_ARN: dbCluster.secret!.secretArn,
+        BEDROCK_AGENT_ID: process.env.BEDROCK_AGENT_ID || '',
+        BEDROCK_AGENT_ALIAS_ID: process.env.BEDROCK_AGENT_ALIAS_ID || 'TSTALIASID',
+        BEDROCK_GUARDRAIL_ID: process.env.BEDROCK_GUARDRAIL_ID || '',
       },
     });
     api.root.addResource('health').addMethod('GET', new apigateway.LambdaIntegration(healthFn));
@@ -596,6 +656,37 @@ exports.handler = async (event) => {
       userProfileFn,
       healthFn,
     ];
+
+    // Agent Action Group Lambda — invoked by Bedrock Agent for real data actions
+    const agentActionFn = new lambdaNode.NodejsFunction(this, 'AgentActionFunction', {
+      functionName: 'vaanisetu-agent-action',
+      entry: path.join(backendPath, 'api/agent/action-handler.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_20_X,
+      role: lambdaExecutionRole,
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 512,
+      tracing: lambda.Tracing.ACTIVE,
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
+      environment: {
+        ...nodeOptions.environment,
+        DOCUMENTS_TABLE: documentsTable.tableName,
+      },
+      bundling: { externalModules: ['@aws-sdk/*'], minify: true },
+    });
+
+    // Allow Bedrock service to invoke the Action Lambda
+    agentActionFn.addPermission('BedrockAgentInvoke', {
+      principal: new iam.ServicePrincipal('bedrock.amazonaws.com'),
+      action: 'lambda:InvokeFunction',
+      sourceArn: `arn:aws:bedrock:${this.region}:${this.account}:agent/*`,
+    });
+
+    new cdk.CfnOutput(this, 'AgentActionLambdaArn', {
+      value: agentActionFn.functionArn,
+      description: 'Lambda ARN for Bedrock Agent Action Group',
+    });
 
     dashboard.addWidgets(
       new cloudwatch.GraphWidget({

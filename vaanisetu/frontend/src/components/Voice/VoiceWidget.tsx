@@ -26,6 +26,11 @@ export default function VoiceWidget() {
   const [slowMessage, setSlowMessage] = useState(false);
   const [textFallback, setTextFallback] = useState('');
   const [speechRecognition, setSpeechRecognition] = useState<any>(null);
+  const [agentTrace, setAgentTrace] = useState<{
+    actionCalled?: string;
+    agentUsed?: boolean;
+    guardrailApplied?: boolean;
+  } | null>(null);
 
   const mountedRef = useRef(true);
 
@@ -88,8 +93,14 @@ export default function VoiceWidget() {
 
       const payload = (res as any).data || res;
       const reply = payload.responseText ?? t('common.error');
+      const trace = {
+        actionCalled: payload.agentTrace?.actionCalled ?? null,
+        agentUsed: payload.agentUsed ?? false,
+        guardrailApplied: payload.guardrailApplied ?? false,
+      };
 
       setResponseText(reply);
+      setAgentTrace(trace);
       setSessionContext((prev) => [...prev.slice(-8), { role: 'user', content: text }, { role: 'assistant', content: reply }]);
 
       if (typeof window !== 'undefined' && window.speechSynthesis) {
@@ -190,6 +201,24 @@ export default function VoiceWidget() {
           <div className="bg-surface-elevated border border-surface-border p-3 rounded-lg mr-4">
             <p className="text-sm text-primary-500 mb-1">{t('voice.ai_response')}</p>
             <p className="text-text-primary">{responseText}</p>
+            {agentTrace?.agentUsed && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                <span className="inline-flex items-center gap-1.5 text-xs font-medium bg-violet-50 text-violet-700 border border-violet-200 rounded-full px-3 py-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-violet-500 animate-pulse" />
+                  Amazon Bedrock Agent
+                </span>
+                {agentTrace.actionCalled && (
+                  <span className="inline-flex items-center gap-1 text-xs bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full px-3 py-1">
+                    ⚡ {agentTrace.actionCalled}()
+                  </span>
+                )}
+                {agentTrace.guardrailApplied && (
+                  <span className="inline-flex items-center gap-1 text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded-full px-3 py-1">
+                    🛡️ Guardrails Active
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>
