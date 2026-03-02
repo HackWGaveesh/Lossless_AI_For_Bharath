@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Mic, MicOff, X } from 'lucide-react';
+import { useQueryClient } from 'react-query';
 import Button from '../Common/Button';
 import { voiceQuery } from '../../services/api';
 import { useLanguage } from '../../contexts/LanguageContext';
@@ -14,7 +15,8 @@ const LANG_MAP: Record<string, string> = {
 };
 
 export default function VoiceWidget() {
-  const { language, t } = useLanguage();
+  const { language, t, setLanguage } = useLanguage();
+  const queryClient = useQueryClient();
   const langCode = LANG_MAP[language] ?? 'hi-IN';
 
   const [isOpen, setIsOpen] = useState(true);
@@ -31,6 +33,21 @@ export default function VoiceWidget() {
     agentUsed?: boolean;
     guardrailApplied?: boolean;
   } | null>(null);
+  const [responseMode, setResponseMode] = useState<'agent' | 'workflow' | 'direct_model' | null>(null);
+  const [execution, setExecution] = useState<{
+    intent?: string;
+    confidence?: number;
+    entities?: Record<string, unknown>;
+    steps?: string[];
+  } | null>(null);
+  const [pendingConfirmation, setPendingConfirmation] = useState<{
+    type?: string;
+    confirmationToken?: string | null;
+    scheme?: Record<string, unknown>;
+    options?: Array<{ id?: string; code?: string; name?: string; benefitRs?: number }>;
+    missingDocuments?: string[];
+  } | null>(null);
+  const [budgetMode, setBudgetMode] = useState<'normal' | 'guarded' | 'strict'>('normal');
 
   const mountedRef = useRef(true);
 
@@ -78,19 +95,23 @@ export default function VoiceWidget() {
 
   const sessionIdRef = useRef(`vs-${Math.random().toString(36).substring(2, 10)}${Date.now()}`);
 
-  const sendToBackend = async (text: string) => {
+  const sendToBackend = async (text: string, opts?: { confirmationToken?: string | null }) => {
     if (!mountedRef.current || !text.trim()) return;
     setIsProcessing(true);
     setSlowMessage(false);
     const slowTimer = setTimeout(() => {
       if (mountedRef.current) setSlowMessage(true);
     }, 5000);
+
     try {
       const res = await voiceQuery({
         transcript: text,
         language: langCode,
         sessionContext: sessionContext.slice(-6),
         sessionId: sessionIdRef.current,
+        channel: 'voice_widget',
+        idempotencyKey: `voice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        confirmationToken: opts?.confirmationToken || undefined,
       });
       if (!mountedRef.current) return;
 
@@ -104,7 +125,21 @@ export default function VoiceWidget() {
 
       setResponseText(reply);
       setAgentTrace(trace);
+      setResponseMode(payload.responseMode ?? (trace.agentUsed ? 'agent' : 'direct_model'));
+      setExecution(payload.execution ?? null);
+      setPendingConfirmation(payload.pendingConfirmation ?? null);
+      setBudgetMode(payload.budgetMode ?? 'normal');
       setSessionContext((prev) => [...prev.slice(-8), { role: 'user', content: text }, { role: 'assistant', content: reply }]);
+
+      const maybeLang = String(payload.execution?.entities?.preferredLanguage || payload.pendingConfirmation?.preferredLanguage || '').trim();
+      if (payload.actionResultType === 'language_updated' && ['en', 'hi', 'ta', 'te', 'mr', 'kn'].includes(maybeLang)) {
+        setLanguage(maybeLang as any);
+      }
+
+      if (payload.applicationSubmitted) {
+        queryClient.invalidateQueries('applications');
+        queryClient.invalidateQueries('userStats');
+      }
 
       if (typeof window !== 'undefined' && window.speechSynthesis) {
         const utter = new SpeechSynthesisUtterance(reply);
@@ -141,7 +176,9 @@ export default function VoiceWidget() {
     if (speechRecognition) {
       try {
         speechRecognition.stop();
-      } catch (err) { }
+      } catch {
+        // ignore
+      }
     }
     setIsListening(false);
   };
@@ -204,22 +241,95 @@ export default function VoiceWidget() {
           <div className="bg-surface-elevated border border-surface-border p-3 rounded-lg mr-4">
             <p className="text-sm text-primary-500 mb-1">{t('voice.ai_response')}</p>
             <p className="text-text-primary">{responseText}</p>
-            {agentTrace?.agentUsed && (
+            {(responseMode || agentTrace?.agentUsed) && (
               <div className="mt-3 flex flex-wrap gap-2">
-                <span className="inline-flex items-center gap-1.5 text-xs font-medium bg-violet-50 text-violet-700 border border-violet-200 rounded-full px-3 py-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-violet-500 animate-pulse" />
-                  Amazon Bedrock Agent
-                </span>
-                {agentTrace.actionCalled && (
+                {responseMode === 'agent' && (
+                  <span className="inline-flex items-center gap-1.5 text-xs font-medium bg-violet-50 text-violet-700 border border-violet-200 rounded-full px-3 py-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-violet-500 animate-pulse" />
+                    Amazon Bedrock Agent
+                  </span>
+                )}
+                {responseMode === 'workflow' && (
+                  <span className="inline-flex items-center gap-1 text-xs bg-sky-50 text-sky-700 border border-sky-200 rounded-full px-3 py-1">
+                    Workflow Engine
+                  </span>
+                )}
+                {responseMode === 'direct_model' && (
+                  <span className="inline-flex items-center gap-1 text-xs bg-amber-50 text-amber-700 border border-amber-200 rounded-full px-3 py-1">
+                    Direct Model Fallback
+                  </span>
+                )}
+                {agentTrace?.actionCalled && (
                   <span className="inline-flex items-center gap-1 text-xs bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full px-3 py-1">
-                    ⚡ {agentTrace.actionCalled}()
+                    Action: {agentTrace.actionCalled}()
                   </span>
                 )}
-                {agentTrace.guardrailApplied && (
+                {agentTrace?.guardrailApplied && (
                   <span className="inline-flex items-center gap-1 text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded-full px-3 py-1">
-                    🛡️ Guardrails Active
+                    Guardrails Active
                   </span>
                 )}
+                {budgetMode !== 'normal' && (
+                  <span className="inline-flex items-center gap-1 text-xs bg-rose-50 text-rose-700 border border-rose-200 rounded-full px-3 py-1">
+                    Budget Mode: {budgetMode}
+                  </span>
+                )}
+              </div>
+            )}
+            {execution && (
+              <div className="mt-3 rounded-lg border border-surface-border bg-surface-bg p-2 text-xs text-text-secondary space-y-1">
+                <div><span className="font-medium">Intent:</span> {execution.intent || '-'}</div>
+                <div><span className="font-medium">Confidence:</span> {typeof execution.confidence === 'number' ? `${Math.round(execution.confidence * 100)}%` : '-'}</div>
+                <div><span className="font-medium">Steps:</span> {Array.isArray(execution.steps) ? execution.steps.join(' -> ') : '-'}</div>
+              </div>
+            )}
+            {pendingConfirmation?.type === 'scheme_disambiguation' && Array.isArray(pendingConfirmation.options) && pendingConfirmation.options.length > 0 && (
+              <div className="mt-3 rounded-lg border border-surface-border bg-surface-bg p-2 space-y-2">
+                <p className="text-xs font-medium text-text-secondary">Pick one scheme:</p>
+                <div className="flex flex-wrap gap-2">
+                  {pendingConfirmation.options.slice(0, 3).map((opt) => (
+                    <button
+                      key={`${opt.id || opt.code || opt.name}`}
+                      onClick={() => {
+                        const label = opt.name || opt.code || opt.id || '';
+                        if (label) {
+                          setTranscript(`apply for ${label}`);
+                          void sendToBackend(`apply for ${label}`);
+                        }
+                      }}
+                      className="px-3 py-1.5 rounded-full border border-primary-300 text-primary-700 bg-primary-50 text-xs"
+                    >
+                      {opt.name || opt.code || opt.id}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {pendingConfirmation?.type === 'application_confirm' && (
+              <div className="mt-3 rounded-lg border border-surface-border bg-surface-bg p-2 space-y-2">
+                <p className="text-xs font-medium text-text-secondary">Ready to submit this application?</p>
+                <div className="flex gap-2">
+                  <Button
+                    className="flex-1"
+                    onClick={() => {
+                      const name = (pendingConfirmation.scheme as any)?.nameEn || (pendingConfirmation.scheme as any)?.name || 'this scheme';
+                      setTranscript(`confirm application for ${name}`);
+                      void sendToBackend(`confirm application for ${name}`, { confirmationToken: pendingConfirmation.confirmationToken || null });
+                    }}
+                  >
+                    Confirm
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="flex-1"
+                    onClick={() => {
+                      setPendingConfirmation(null);
+                      setResponseText('Application cancelled. You can ask me to apply again anytime.');
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                </div>
               </div>
             )}
           </div>

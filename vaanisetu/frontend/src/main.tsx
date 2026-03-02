@@ -25,13 +25,13 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <BrowserRouter>
       <QueryClientProvider client={queryClient}>
-        <LanguageProvider>
-          <AuthProvider>
+        <AuthProvider>
+          <LanguageProvider>
             <ErrorBoundary>
               <App />
             </ErrorBoundary>
-          </AuthProvider>
-        </LanguageProvider>
+          </LanguageProvider>
+        </AuthProvider>
       </QueryClientProvider>
     </BrowserRouter>
   </React.StrictMode>

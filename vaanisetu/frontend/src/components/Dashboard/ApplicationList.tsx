@@ -6,8 +6,12 @@ import { useLanguage } from '../../contexts/LanguageContext';
 export interface ApplicationItem {
   application_id: string;
   scheme_id: string;
+  scheme_name?: string;
+  scheme_code?: string;
   status: string;
   created_at: string;
+  updated_at?: string;
+  missing_documents?: string[];
 }
 
 interface ApplicationListProps {
@@ -59,7 +63,7 @@ export default function ApplicationList({ applications }: ApplicationListProps) 
               <tr key={app.application_id} className="hover:bg-surface-elevated">
                 <td className="px-6 py-4 flex items-center gap-2">
                   <FileText className="w-4 h-4 text-text-muted" />
-                  <span className="font-medium text-text-primary">{app.scheme_id}</span>
+                  <span className="font-medium text-text-primary">{app.scheme_name || app.scheme_code || app.scheme_id}</span>
                 </td>
                 <td className="px-6 py-4">
                   <span

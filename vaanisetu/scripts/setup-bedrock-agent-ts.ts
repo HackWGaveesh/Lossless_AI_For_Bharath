@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 const REGION = 'ap-south-1';
-const agentClient = new BedrockAgentClient({ region: REGION });
+const agentClient = new BedrockAgentClient({ region: 'us-east-1' });
 const lambdaClient = new LambdaClient({ region: REGION });
 const cfnClient = new CloudFormationClient({ region: REGION });
 
@@ -51,7 +51,7 @@ async function main() {
 
         console.log('Creating Bedrock Agent...');
         const agentResp = await agentClient.send(new CreateAgentCommand({
-            agentName: 'vaanisetu-orchestrator-v4',
+            agentName: 'vaanisetu-orchestrator-v5',
             description: 'VaaniSetu multi-agent orchestrator for rural citizen services',
             agentResourceRoleArn: bedrockRoleArn,
             foundationModel: 'us.amazon.nova-pro-v1:0',
@@ -84,7 +84,7 @@ RULES:
             agentVersion: 'DRAFT',
             actionGroupName: 'vaanisetu-actions',
             description: 'Core actions for VaaniSetu',
-            actionGroupExecutor: { lambda: agentLambdaArn },
+            actionGroupExecutor: { customControl: 'RETURN_CONTROL' },
             functionSchema: {
                 functions: [
                     {
@@ -135,7 +135,7 @@ RULES:
                 StatementId: `allow-bedrock-agent-${agentId}`,
                 Action: 'lambda:InvokeFunction',
                 Principal: 'bedrock.amazonaws.com',
-                SourceArn: `arn:aws:bedrock:${REGION}:${accountId}:agent/${agentId}`
+                SourceArn: `arn:aws:bedrock:us-east-1:${accountId}:agent/${agentId}`
             }));
         } catch (e: any) {
             if (e.name !== 'ResourceConflictException') throw e;

@@ -3,6 +3,11 @@ import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
 import { VaaniSetuStack } from '../lib/vaanisetu-stack';
 
+import * as dotenv from 'dotenv';
+import * as path from 'path';
+
+dotenv.config({ path: path.join(__dirname, '../../.env') });
+
 const app = new cdk.App();
 
 new VaaniSetuStack(app, 'VaaniSetuStack', {

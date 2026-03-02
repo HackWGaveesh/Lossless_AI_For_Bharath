@@ -62,12 +62,29 @@ export default function ApplicationForm({ schemeId, schemeName, documentsRequire
     setSubmitting(true);
     setError(null);
     try {
+      const idempotencyKey = `web-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const res = await createApplication({
         userId,
         schemeId,
+        schemeName,
+        query: schemeName,
+        idempotencyKey,
         formData: { ...form, ...profile },
       });
-      const applicationId = (res?.data as { applicationId?: string })?.applicationId;
+      let applicationId = (res?.data as { applicationId?: string })?.applicationId;
+      if (!applicationId && (res as any)?.data?.needsConfirmation && (res as any)?.data?.confirmationToken) {
+        const confirmRes = await createApplication({
+          userId,
+          schemeId,
+          schemeName,
+          query: schemeName,
+          confirm: true,
+          confirmationToken: (res as any).data.confirmationToken,
+          idempotencyKey,
+          formData: { ...form, ...profile },
+        });
+        applicationId = (confirmRes?.data as { applicationId?: string })?.applicationId;
+      }
       setRefNumber(applicationId ?? 'APP-SUBMITTED');
       setStep(4);
     } catch (e) {

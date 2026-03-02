@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
+import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
 import { translations, getTranslation, type Language } from '../i18n/translations';
 
 interface LanguageContextValue {
@@ -10,11 +10,28 @@ interface LanguageContextValue {
 const LanguageContext = createContext<LanguageContextValue | null>(null);
 
 export type { Language };
+const LANG_KEY = 'vaanisetu_language';
+const ALLOWED: Language[] = ['en', 'hi', 'ta', 'te', 'mr', 'kn'];
 
 export function LanguageProvider({ children }: { children: ReactNode }) {
-  const [language, setLanguageState] = useState<Language>('en');
+  const [language, setLanguageState] = useState<Language>(() => {
+    if (typeof window === 'undefined') return 'en';
+    const stored = localStorage.getItem(LANG_KEY) as Language | null;
+    return stored && ALLOWED.includes(stored) ? stored : 'en';
+  });
 
-  const setLanguage = useCallback((lang: Language) => setLanguageState(lang), []);
+  const setLanguage = useCallback((lang: Language) => {
+    setLanguageState(lang);
+    if (typeof window !== 'undefined') localStorage.setItem(LANG_KEY, lang);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const stored = localStorage.getItem(LANG_KEY) as Language | null;
+    if (stored && ALLOWED.includes(stored) && stored !== language) {
+      setLanguageState(stored);
+    }
+  }, []);
 
   const t = useCallback(
     (key: string) => getTranslation(language, key),

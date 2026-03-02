@@ -37,9 +37,15 @@ export const handler: APIGatewayProxyHandler = async (event) => {
     const applications = items.map((item: any) => ({
       application_id: item.application_id,
       scheme_id: item.scheme_id,
+      scheme_name: item.scheme_name,
+      scheme_code: item.scheme_code,
       status: item.status,
       created_at: item.created_at,
-    }));
+      updated_at: item.updated_at,
+      missing_documents: item.missing_documents ?? [],
+    })).sort((a: any, b: any) =>
+      new Date(String(b.created_at || 0)).getTime() - new Date(String(a.created_at || 0)).getTime()
+    );
 
     return sendSuccessResponse({ applications });
   } catch (error) {

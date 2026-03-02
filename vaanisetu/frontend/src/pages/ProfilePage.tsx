@@ -22,7 +22,7 @@ const CASTE_OPTIONS = ['General', 'OBC', 'SC', 'ST', 'EWS'];
 
 export default function ProfilePage() {
   const { user } = useAuth();
-  const { t } = useLanguage();
+  const { t, setLanguage } = useLanguage();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({
@@ -56,6 +56,10 @@ export default function ProfilePage() {
           casteCategory: ((p.casteCategory ?? p.caste_category) as string) ?? '',
           bplCardholder: !!(p.bplCardholder ?? p.bpl_cardholder),
         });
+        const pref = ((p.preferredLanguage ?? p.preferred_language) as string) ?? '';
+        if (pref && ['en', 'hi', 'ta', 'te', 'mr', 'kn'].includes(pref)) {
+          setLanguage(pref as any);
+        }
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -91,6 +95,9 @@ export default function ProfilePage() {
         casteCategory: form.casteCategory || undefined,
         bplCardholder: form.bplCardholder,
       });
+      if (['en', 'hi', 'ta', 'te', 'mr', 'kn'].includes(form.preferredLanguage)) {
+        setLanguage(form.preferredLanguage as any);
+      }
       showToast(t('profile.saved'), 'success');
     } catch {
       showToast(t('profile.save_error'), 'error');

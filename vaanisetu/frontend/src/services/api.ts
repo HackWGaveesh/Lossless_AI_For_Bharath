@@ -39,8 +39,12 @@ export interface SchemesResponse {
 export interface ApplicationItem {
   application_id: string;
   scheme_id: string;
+  scheme_name?: string;
+  scheme_code?: string;
   status: string;
   created_at: string;
+  updated_at?: string;
+  missing_documents?: string[];
 }
 
 export async function fetchSchemes(params?: { category?: string; benefitType?: string; limit?: number; offset?: number }) {
@@ -133,16 +137,68 @@ export async function requestDocumentUpload(body: {
   return data;
 }
 
-export async function createApplication(body: { userId: string; schemeId: string; formData?: Record<string, unknown> }) {
-  const { data } = await api.post<{ success: boolean; data: { applicationId: string; status: string } }>(
+export async function createApplication(body: {
+  userId: string;
+  schemeId?: string;
+  schemeName?: string;
+  query?: string;
+  formData?: Record<string, unknown>;
+  confirm?: boolean;
+  confirmationToken?: string;
+  idempotencyKey?: string;
+}) {
+  const { data } = await api.post<{ success: boolean; data: {
+    applicationId?: string;
+    status?: string;
+    needsConfirmation?: boolean;
+    confirmationToken?: string | null;
+    missingDocuments?: string[];
+    schemeId?: string | null;
+    schemeCode?: string | null;
+    schemeName?: string | null;
+    code?: string;
+    message?: string;
+  } }>(
     '/applications',
     body
   );
   return data;
 }
 
-export async function voiceQuery(params: { transcript: string; language?: string; sessionContext?: { role: string; content: string }[]; sessionId?: string }) {
-  const { data } = await api.post<{ success: boolean; data: { responseText: string; language: string } }>(
+export async function voiceQuery(params: {
+  transcript: string;
+  language?: string;
+  sessionContext?: { role: string; content: string }[];
+  sessionId?: string;
+  idempotencyKey?: string;
+  channel?: string;
+  forceLanguage?: string;
+  confirmationToken?: string;
+}) {
+  const { data } = await api.post<{ success: boolean; data: {
+    responseText: string;
+    language: string;
+    agentUsed?: boolean;
+    responseMode?: 'agent' | 'workflow' | 'direct_model';
+    applicationSubmitted?: boolean;
+    applicationId?: string | null;
+    pendingConfirmation?: {
+      type?: string;
+      confirmationToken?: string | null;
+      scheme?: Record<string, unknown>;
+      options?: Array<{ id?: string; code?: string; name?: string; benefitRs?: number }>;
+      missingDocuments?: string[];
+    } | null;
+    execution?: {
+      intent?: string;
+      confidence?: number;
+      entities?: Record<string, unknown>;
+      steps?: string[];
+    } | null;
+    actionResultType?: string | null;
+    budgetMode?: 'normal' | 'guarded' | 'strict';
+    agentTrace?: { actionCalled?: string; agentUsed?: boolean } | null;
+  } }>(
     '/voice/query',
     params,
     { timeout: 60000 }

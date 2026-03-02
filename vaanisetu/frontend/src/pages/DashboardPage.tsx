@@ -43,7 +43,9 @@ export default function DashboardPage() {
   }, []);
 
   const appList = Array.isArray(applications) ? applications : [];
-  const pendingAction = appList.find((a: { status?: string }) => a.status === 'submitted' || a.status === 'pending');
+  const pendingAction = appList.find((a: { status?: string }) => a.status === 'submitted' || a.status === 'pending') as
+    | { application_id: string; scheme_id?: string; scheme_name?: string; scheme_code?: string }
+    | undefined;
 
   if (statsLoading || applicationsLoading) {
     return (
@@ -64,7 +66,7 @@ export default function DashboardPage() {
         </h1>
         <p className="text-text-secondary mt-2 font-sans">
           {pendingAction
-            ? `${t('dashboard.pending_action')}: ${pendingAction.application_id} — ${pendingAction.scheme_id}`
+            ? `${t('dashboard.pending_action')}: ${pendingAction.application_id} - ${pendingAction.scheme_name || pendingAction.scheme_code || pendingAction.scheme_id}`
             : t('dashboard.no_applications')}
         </p>
       </div>

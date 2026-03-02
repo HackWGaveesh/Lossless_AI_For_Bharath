@@ -3,20 +3,21 @@
   "version": "1.0.0",
   "scripts": {
     "build": "tsc",
-    "cdk": "cdk",
-    "deploy": "cdk deploy --all --require-approval never",
-    "destroy": "cdk destroy --all --force",
-    "synth": "cdk synth",
-    "diff": "cdk diff"
+    "cdk": "npx aws-cdk",
+    "deploy": "npx aws-cdk deploy --all --require-approval never",
+    "destroy": "npx aws-cdk destroy --all --force",
+    "synth": "npx aws-cdk synth",
+    "diff": "npx aws-cdk diff"
   },
   "dependencies": {
     "aws-cdk-lib": "^2.170.0",
-    "constructs": "^10.3.0"
+    "constructs": "^10.3.0",
+    "dotenv": "^17.3.1"
   },
   "devDependencies": {
     "@types/node": "^20.11.17",
-    "typescript": "^5.3.3",
+    "source-map-support": "^0.5.21",
     "ts-node": "^10.9.2",
-    "source-map-support": "^0.5.21"
+    "typescript": "^5.3.3"
   }
 }

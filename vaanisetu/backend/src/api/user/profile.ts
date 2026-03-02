@@ -85,13 +85,25 @@ export const handler: APIGatewayProxyHandler = async (event) => {
 
     if (event.httpMethod === 'PUT' || event.httpMethod === 'POST') {
       const updates = normalizeProfile((body ?? {}) as Record<string, unknown>);
+      const updatedFields = Object.keys(updates);
+      if (!updatedFields.length) {
+        return sendErrorResponse(400, 'No profile fields to update');
+      }
       const updatedAt = new Date().toISOString();
+      let merged: Record<string, unknown> = { ...(IN_MEMORY_PROFILES[userId] ?? {}), ...updates, updated_at: updatedAt };
 
       try {
+        const existing = await doc.send(new GetCommand({ TableName: USERS_TABLE, Key: { user_id: userId } }));
+        merged = {
+          ...(existing.Item ?? {}),
+          ...updates,
+          user_id: userId,
+          updated_at: updatedAt,
+        };
         await doc.send(
           new PutCommand({
             TableName: USERS_TABLE,
-            Item: { user_id: userId, ...updates, updated_at: updatedAt },
+            Item: merged,
           })
         );
       } catch (dbError) {
@@ -101,7 +113,11 @@ export const handler: APIGatewayProxyHandler = async (event) => {
       // Always update in-memory for immediate retrieval in dev
       IN_MEMORY_PROFILES[userId] = { ...(IN_MEMORY_PROFILES[userId] ?? {}), ...updates, updated_at: updatedAt };
 
-      return sendSuccessResponse({ profile: updates, updated_at: updatedAt });
+      return sendSuccessResponse({
+        profile: toPublicProfile(merged),
+        updated_at: updatedAt,
+        updatedFields,
+      });
     }
 
     return sendErrorResponse(405, 'Method not allowed');

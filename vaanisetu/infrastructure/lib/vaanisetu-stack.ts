@@ -15,6 +15,8 @@ import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as lambdaNode from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as logs from 'aws-cdk-lib/aws-logs';
+import * as budgets from 'aws-cdk-lib/aws-budgets';
 import path from 'path';
 
 export class VaaniSetuStack extends cdk.Stack {
@@ -130,8 +132,9 @@ export class VaaniSetuStack extends cdk.Stack {
       writer: rds.ClusterInstance.serverlessV2('writer'),
       vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
-      serverlessV2MinCapacity: 0.5,
+      serverlessV2MinCapacity: 0,
       serverlessV2MaxCapacity: 2,
+      serverlessV2AutoPauseDuration: cdk.Duration.minutes(15),
       enableDataApi: true,
       defaultDatabaseName: 'vaanisetu',
       storageEncryptionKey: kmsKey,
@@ -151,6 +154,7 @@ export class VaaniSetuStack extends cdk.Stack {
         'bedrock:InvokeModel',
         'bedrock:InvokeModelWithResponseStream',
         'bedrock:Retrieve',
+        'bedrock:ApplyGuardrail',
       ],
       resources: ['*'],
     }));
@@ -240,6 +244,7 @@ export class VaaniSetuStack extends cdk.Stack {
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: 'index.handler',
       timeout: cdk.Duration.seconds(10),
+      logRetention: logs.RetentionDays.ONE_WEEK,
       code: lambda.Code.fromInline(`
 exports.handler = async (event) => {
   const session = event.request.session || [];
@@ -267,6 +272,7 @@ exports.handler = async (event) => {
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: 'index.handler',
       timeout: cdk.Duration.seconds(15),
+      logRetention: logs.RetentionDays.ONE_WEEK,
       environment: {
         TEST_OTP_ENABLED: 'true',
         TEST_OTP_CODE: '112233',
@@ -329,6 +335,7 @@ exports.handler = async (event) => {
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: 'index.handler',
       timeout: cdk.Duration.seconds(10),
+      logRetention: logs.RetentionDays.ONE_WEEK,
       code: lambda.Code.fromInline(`
 exports.handler = async (event) => {
   event.response.answerCorrect =
@@ -342,6 +349,7 @@ exports.handler = async (event) => {
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: 'index.handler',
       timeout: cdk.Duration.seconds(5),
+      logRetention: logs.RetentionDays.ONE_WEEK,
       code: lambda.Code.fromInline(`
 exports.handler = async (event) => {
   event.response.autoConfirmUser = true;
@@ -351,12 +359,14 @@ exports.handler = async (event) => {
     });
 
     const backendPath = path.join(__dirname, '../../backend/src');
+    const budgetMode = String(process.env.BUDGET_MODE || 'normal').toLowerCase();
     const nodeOptions = {
       runtime: lambda.Runtime.NODEJS_20_X,
       role: lambdaExecutionRole,
       timeout: cdk.Duration.seconds(30),
       memorySize: 512,
       tracing: lambda.Tracing.ACTIVE,
+      logRetention: logs.RetentionDays.ONE_WEEK,
       environment: {
         USERS_TABLE: usersTable.tableName,
         APPLICATIONS_TABLE: applicationsTable.tableName,
@@ -365,6 +375,7 @@ exports.handler = async (event) => {
         DB_NAME: 'vaanisetu',
         REGION: this.region,
         NOTIFICATION_TOPIC_ARN: notificationTopic.topicArn,
+        BUDGET_MODE: budgetMode,
       },
     };
 
@@ -482,8 +493,8 @@ exports.handler = async (event) => {
       deployOptions: {
         stageName: 'prod',
         tracingEnabled: true,
-        loggingLevel: apigateway.MethodLoggingLevel.INFO,
-        dataTraceEnabled: true,
+        loggingLevel: apigateway.MethodLoggingLevel.ERROR,
+        dataTraceEnabled: false,
         metricsEnabled: true,
       },
       defaultCorsPreflightOptions: {
@@ -596,6 +607,37 @@ exports.handler = async (event) => {
     api.root.addResource('health').addMethod('GET', new apigateway.LambdaIntegration(healthFn));
 
     notificationTopic.grantPublish(lambdaExecutionRole);
+    notificationTopic.addToResourcePolicy(new iam.PolicyStatement({
+      principals: [new iam.ServicePrincipal('budgets.amazonaws.com')],
+      actions: ['SNS:Publish'],
+      resources: [notificationTopic.topicArn],
+    }));
+
+    new budgets.CfnBudget(this, 'VaaniSetuMonthlyBudget', {
+      budget: {
+        budgetName: `VaaniSetu-Monthly-${this.account}`,
+        budgetType: 'COST',
+        timeUnit: 'MONTHLY',
+        budgetLimit: {
+          amount: 50,
+          unit: 'USD',
+        },
+      },
+      notificationsWithSubscribers: [35, 45, 50].map((threshold) => ({
+        notification: {
+          comparisonOperator: 'GREATER_THAN',
+          notificationType: 'FORECASTED',
+          threshold,
+          thresholdType: 'PERCENTAGE',
+        },
+        subscribers: [
+          {
+            subscriptionType: 'SNS',
+            address: notificationTopic.topicArn,
+          },
+        ],
+      })),
+    });
 
     const userPool = new cognito.UserPool(this, 'VaaniSetuUserPool', {
       userPoolName: 'vaanisetu-users',
@@ -664,11 +706,11 @@ exports.handler = async (event) => {
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_20_X,
       role: lambdaExecutionRole,
-      timeout: cdk.Duration.seconds(30),
+      timeout: cdk.Duration.seconds(60),
       memorySize: 512,
       tracing: lambda.Tracing.ACTIVE,
-      vpc,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
+      logRetention: logs.RetentionDays.ONE_WEEK,
+      // No VPC — allows fast cold starts and outbound to DynamoDB/SNS without VPC endpoints
       environment: {
         ...nodeOptions.environment,
         DOCUMENTS_TABLE: documentsTable.tableName,

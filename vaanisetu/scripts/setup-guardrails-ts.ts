@@ -2,7 +2,7 @@ import { BedrockClient, CreateGuardrailCommand, CreateGuardrailVersionCommand } 
 import * as fs from 'fs';
 import * as path from 'path';
 
-const REGION = 'ap-south-1';
+const REGION = 'us-east-1';
 const client = new BedrockClient({ region: REGION });
 
 async function main() {
