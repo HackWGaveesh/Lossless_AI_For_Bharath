@@ -8,7 +8,7 @@ const navRoutes = [
   { to: '/schemes', icon: FileText, key: 'nav.schemes' },
   { to: '/applications', icon: FolderOpen, key: 'nav.applications' },
   { to: '/documents', icon: Image, key: 'nav.documents' },
-  { to: '/agents', icon: Bot, key: 'nav.agents' },
+  { to: '/assistant', icon: Bot, key: 'nav.agents' },
 ];
 
 export default function BottomNav() {

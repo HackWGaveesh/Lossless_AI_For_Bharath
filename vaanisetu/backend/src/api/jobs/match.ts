@@ -14,6 +14,7 @@ const bedrock = new BedrockRuntimeClient({
 });
 const rds = new RDSDataClient({ region: process.env.REGION });
 const MODEL_ID = 'us.amazon.nova-pro-v1:0';
+const ALLOW_LOCAL_DATA_FALLBACK = process.env.ALLOW_LOCAL_DATA_FALLBACK === 'true';
 
 export const handler: APIGatewayProxyHandler = async (event) => {
   try {
@@ -45,6 +46,9 @@ export const handler: APIGatewayProxyHandler = async (event) => {
         description: row[9]?.stringValue,
       }));
     } catch (dbError) {
+      if (!ALLOW_LOCAL_DATA_FALLBACK) {
+        throw new Error('DATA_UNAVAILABLE: jobs datasource unavailable');
+      }
       logger.warn('RDS failed during job match, using local JSON fallback', { dbError });
       const fs = await import('fs/promises');
       const path = await import('path');
@@ -100,6 +104,10 @@ export const handler: APIGatewayProxyHandler = async (event) => {
     return sendSuccessResponse({ jobs: matchedJobs });
   } catch (error) {
     logger.error('Jobs match error', { error });
+    const msg = String((error as any)?.message || '');
+    if (msg.includes('DATA_UNAVAILABLE')) {
+      return sendErrorResponse(503, 'Live jobs data is temporarily unavailable');
+    }
     return sendErrorResponse(500, 'Internal server error');
   }
 };

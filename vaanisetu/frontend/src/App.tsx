@@ -14,6 +14,7 @@ const ApplicationsPage = React.lazy(() => import('./pages/ApplicationsPage'));
 const DocumentsPage = React.lazy(() => import('./pages/DocumentsPage'));
 const JobsPage = React.lazy(() => import('./pages/JobsPage'));
 const ProfilePage = React.lazy(() => import('./pages/ProfilePage'));
+const AssistantPage = React.lazy(() => import('./pages/AssistantPage'));
 const AgentPage = React.lazy(() => import('./pages/AgentPage'));
 const NotFoundPage = React.lazy(() => import('./pages/NotFoundPage'));
 
@@ -48,6 +49,7 @@ function App() {
           <Route path="/applications" element={<ApplicationsPage />} />
           <Route path="/documents" element={<DocumentsPage />} />
           <Route path="/jobs" element={<JobsPage />} />
+          <Route path="/assistant" element={<AssistantPage />} />
           <Route path="/profile" element={<ProfilePage />} />
           <Route path="/agents" element={<AgentPage />} />
         </Route>

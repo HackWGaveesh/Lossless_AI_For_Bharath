@@ -20,6 +20,20 @@ const OCCUPATION_KEYS = ['eligibility.farmer', 'eligibility.self_employed', 'eli
 const OCCUPATIONS = ['Farmer', 'Self-employed', 'Student', 'Salaried', 'Unemployed', 'Homemaker'];
 const CASTE_OPTIONS = ['General', 'OBC', 'SC', 'ST', 'EWS'];
 
+function sanitizePhone(value: unknown): string {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw || /^[0-9a-f-]{30,}$/i.test(raw)) return '';
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length < 10 || digits.length > 13) return '';
+  return digits.length === 10 ? `+91${digits}` : `+${digits}`;
+}
+
+function sanitizeName(value: unknown): string {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw || /^[0-9a-f-]{30,}$/i.test(raw)) return '';
+  return raw;
+}
+
 export default function ProfilePage() {
   const { user } = useAuth();
   const { t, setLanguage } = useLanguage();
@@ -43,9 +57,11 @@ export default function ProfilePage() {
     fetchProfile()
       .then((res) => {
         const p = (res?.data?.profile ?? {}) as Record<string, unknown>;
+        const fullName = sanitizeName(p.fullName ?? p.name ?? user?.name ?? '');
+        const phone = sanitizePhone(p.phone ?? user?.phone ?? '');
         setForm({
-          fullName: (p.fullName ?? p.name ?? user?.name ?? '') as string,
-          phone: (p.phone ?? user?.phone ?? '') as string,
+          fullName: fullName as string,
+          phone: phone as string,
           age: (p.age as number) ?? '',
           gender: (p.gender as string) ?? '',
           state: (p.state as string) ?? '',
@@ -61,9 +77,11 @@ export default function ProfilePage() {
           setLanguage(pref as any);
         }
       })
-      .catch(() => {})
+      .catch(() => {
+        showToast('Failed to load profile. Please retry.', 'error');
+      })
       .finally(() => setLoading(false));
-  }, [user?.name, user?.phone]);
+  }, [user?.id, user?.name, user?.phone, setLanguage]);
 
   const filled = [
     form.fullName,
@@ -81,10 +99,11 @@ export default function ProfilePage() {
   const handleSave = async () => {
     setSaving(true);
     try {
+      const safePhone = sanitizePhone(form.phone);
       await updateProfile({
         fullName: form.fullName,
         name: form.fullName,
-        phone: form.phone,
+        phone: safePhone || undefined,
         age: form.age === '' ? undefined : Number(form.age),
         gender: form.gender || undefined,
         state: form.state || undefined,

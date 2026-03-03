@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
-import { fetchSchemeDetail, type SchemeDetail } from '../services/api';
+import { fetchSchemeDetail, fetchProfile, type SchemeDetail } from '../services/api';
 import Button from '../components/Common/Button';
 import { SkeletonCard } from '../components/Common/Skeleton';
 import ApplicationForm from '../components/Schemes/ApplicationForm';
@@ -16,6 +16,94 @@ const CATEGORY_KEYS: Record<string, string> = {
   employment: 'schemes.employment',
 };
 
+interface EligibilityCheck {
+  eligible: boolean;
+  matchReasons: string[];
+  exclusionReasons: string[];
+}
+
+/** Lightweight client-side eligibility check (mirrors backend evaluateEligibility) */
+function checkEligibility(criteria: Record<string, unknown>, profile: Record<string, unknown>): EligibilityCheck {
+  const matchReasons: string[] = [];
+  const exclusionReasons: string[] = [];
+
+  const userGender = String(profile.gender || '').trim().toLowerCase();
+  const userCaste = String(profile.casteCategory || profile.caste_category || '').trim().toUpperCase();
+  const userAge = Number(profile.age ?? 0);
+  const userIncome = Number(profile.annualIncome ?? profile.annual_income ?? 0);
+  const userBpl = profile.bplCardholder ?? profile.bpl_cardholder;
+
+  // Caste/Gender gate with genderOrCaste OR-logic
+  const casteCats = (criteria.casteCategories as string[] | undefined) ?? [];
+  if (casteCats.length) {
+    const inCaste = userCaste && casteCats.map(c => c.toUpperCase()).includes(userCaste);
+    const isFemale = userGender === 'female' || userGender === 'f';
+    if (criteria.genderOrCaste) {
+      if (inCaste || isFemale) {
+        matchReasons.push(inCaste ? `${userCaste} category eligible` : 'Women entrepreneur eligible');
+      } else if (userCaste || userGender) {
+        exclusionReasons.push(`Requires SC/ST category or Women — not applicable for ${userCaste || userGender} applicants`);
+        return { eligible: false, matchReasons, exclusionReasons };
+      }
+    } else {
+      if (inCaste) { matchReasons.push(`${userCaste} category eligible`); }
+      else if (userCaste) {
+        exclusionReasons.push(`Requires ${casteCats.join('/')} category (your category: ${userCaste})`);
+        return { eligible: false, matchReasons, exclusionReasons };
+      }
+    }
+  }
+
+  // Gender-only gate
+  const reqGender = String(criteria.gender || '').toLowerCase();
+  if (!casteCats.length && reqGender && reqGender !== 'all' && reqGender !== 'any') {
+    if (userGender === reqGender || userGender === reqGender[0]) {
+      matchReasons.push(`${reqGender} eligibility matched`);
+    } else if (userGender) {
+      exclusionReasons.push(`This scheme requires ${reqGender} applicants`);
+      return { eligible: false, matchReasons, exclusionReasons };
+    }
+  }
+
+  // Age gate
+  const ageMin = criteria.ageMin != null ? Number(criteria.ageMin) : null;
+  const ageMax = criteria.ageMax != null ? Number(criteria.ageMax) : null;
+  if ((ageMin != null || ageMax != null) && userAge > 0) {
+    const okMin = ageMin == null || userAge >= ageMin;
+    const okMax = ageMax == null || userAge <= ageMax;
+    if (okMin && okMax) {
+      matchReasons.push(`Age ${userAge} within eligibility`);
+    } else {
+      exclusionReasons.push(okMin ? `Age ${userAge} exceeds max ${ageMax}` : `Age ${userAge} below min ${ageMin}`);
+      return { eligible: false, matchReasons, exclusionReasons };
+    }
+  }
+
+  // Income gate
+  const incomeMax = criteria.incomeMax != null ? Number(criteria.incomeMax) : null;
+  if (incomeMax != null && userIncome > 0) {
+    if (userIncome <= incomeMax) { matchReasons.push(`Income within ₹${incomeMax.toLocaleString('en-IN')} limit`); }
+    else {
+      exclusionReasons.push(`Income ₹${userIncome.toLocaleString('en-IN')} exceeds limit ₹${incomeMax.toLocaleString('en-IN')}`);
+      return { eligible: false, matchReasons, exclusionReasons };
+    }
+  }
+
+  // BPL gate
+  if (criteria.bpl === true) {
+    if (userBpl === true) { matchReasons.push('BPL cardholder eligible'); }
+    else if (userBpl === false) {
+      exclusionReasons.push('Requires BPL card');
+      return { eligible: false, matchReasons, exclusionReasons };
+    }
+  }
+
+  if (matchReasons.length === 0 && exclusionReasons.length === 0) {
+    matchReasons.push('Open to all eligible applicants');
+  }
+  return { eligible: exclusionReasons.length === 0, matchReasons, exclusionReasons };
+}
+
 export default function SchemeDetailPage() {
   const { schemeId } = useParams<{ schemeId: string }>();
   const [searchParams] = useSearchParams();
@@ -27,14 +115,25 @@ export default function SchemeDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showApplyModal, setShowApplyModal] = useState(actionApply);
+  const [eligibility, setEligibility] = useState<EligibilityCheck | null>(null);
 
   useEffect(() => {
     if (!schemeId) return;
     setLoading(true);
     fetchSchemeDetail(schemeId)
       .then((res) => {
-        setScheme(res?.data?.scheme ?? null);
+        const s = res?.data?.scheme ?? null;
+        setScheme(s);
         setError(null);
+        // Fetch user profile for eligibility check
+        if (s?.eligibilityCriteria) {
+          fetchProfile().then(profileRes => {
+            const profile = (profileRes as any)?.data?.profile ?? {};
+            if (Object.keys(profile).length > 0) {
+              setEligibility(checkEligibility(s.eligibilityCriteria!, profile));
+            }
+          }).catch(() => { /* non-fatal */ });
+        }
       })
       .catch(() => {
         setError(t('schemes.scheme_not_found'));
@@ -111,9 +210,55 @@ export default function SchemeDetailPage() {
         </div>
         <div className="bg-surface-card border border-surface-border rounded-card p-6 shadow-card">
           <h2 className="font-display text-lg font-semibold text-text-primary mb-3">{t('eligibility.title')}</h2>
-          <p className="text-sm text-text-secondary">
-            Check the scheme criteria on the official portal. This scheme is open for enrollment.
-          </p>
+          {eligibility ? (
+            <>
+              <div className={`flex items-center gap-2 mb-3 font-semibold text-sm ${eligibility.eligible ? 'text-green-700' : 'text-red-600'}`}>
+                <span>{eligibility.eligible ? '✅ You may be eligible' : '❌ You may not be eligible'}</span>
+              </div>
+              {eligibility.matchReasons.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {eligibility.matchReasons.map((r, i) => (
+                    <span key={i} className="inline-flex items-center text-xs bg-green-50 text-green-700 border border-green-200 rounded-full px-2 py-0.5">✓ {r}</span>
+                  ))}
+                </div>
+              )}
+              {eligibility.exclusionReasons.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {eligibility.exclusionReasons.map((r, i) => (
+                    <span key={i} className="inline-flex items-center text-xs bg-red-50 text-red-700 border border-red-200 rounded-full px-2 py-0.5">✗ {r}</span>
+                  ))}
+                </div>
+              )}
+              {scheme?.eligibilityCriteria && (scheme.eligibilityCriteria as any).eligibility_summary_en && (
+                <p className="text-xs text-text-muted mt-2 italic">{(scheme.eligibilityCriteria as any).eligibility_summary_en}</p>
+              )}
+            </>
+          ) : (
+            <div className="space-y-1 text-sm text-text-secondary">
+              {scheme?.eligibilityCriteria ? (
+                <>
+                  {(scheme.eligibilityCriteria as any).casteCategories?.length > 0 && (
+                    <p>Category: {(scheme.eligibilityCriteria as any).casteCategories.join(', ')}</p>
+                  )}
+                  {(scheme.eligibilityCriteria as any).gender && (scheme.eligibilityCriteria as any).gender !== 'any' && (
+                    <p>Gender: {(scheme.eligibilityCriteria as any).gender}</p>
+                  )}
+                  {(scheme.eligibilityCriteria as any).ageMin && (
+                    <p>Age: {(scheme.eligibilityCriteria as any).ageMin}–{(scheme.eligibilityCriteria as any).ageMax ?? '∞'} years</p>
+                  )}
+                  {(scheme.eligibilityCriteria as any).incomeMax && (
+                    <p>Income: up to ₹{Number((scheme.eligibilityCriteria as any).incomeMax).toLocaleString('en-IN')}/year</p>
+                  )}
+                  {(scheme.eligibilityCriteria as any).eligibility_summary_en && (
+                    <p className="italic text-text-muted">{(scheme.eligibilityCriteria as any).eligibility_summary_en}</p>
+                  )}
+                </>
+              ) : (
+                <p>Check the scheme criteria on the official portal.</p>
+              )}
+              <p className="text-xs text-text-muted mt-2">Update your profile for a personalised eligibility check.</p>
+            </div>
+          )}
         </div>
       </div>
 

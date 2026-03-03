@@ -3,6 +3,7 @@ import { BedrockAgentRuntimeClient, InvokeAgentCommand } from '@aws-sdk/client-b
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
 import { logger } from '../../utils/logger.js';
 import { sendSuccessResponse, sendErrorResponse } from '../../utils/responses.js';
+import { evaluateEligibility } from '../../services/scheme-eligibility-service.js';
 
 const bedrockAgent = new BedrockAgentRuntimeClient({
   region: 'us-east-1',
@@ -12,6 +13,7 @@ const bedrockAgent = new BedrockAgentRuntimeClient({
   } : undefined
 } as any);
 const rds = new RDSDataClient({ region: process.env.REGION });
+const ALLOW_LOCAL_DATA_FALLBACK = process.env.ALLOW_LOCAL_DATA_FALLBACK === 'true';
 
 interface UserProfile {
   age?: number;
@@ -63,6 +65,9 @@ export const handler: APIGatewayProxyHandler = async (event) => {
         ? await fetchSchemeDetails(schemeIds)
         : await fetchAllSchemes(10);
     } catch (err) {
+      if (!ALLOW_LOCAL_DATA_FALLBACK) {
+        throw new Error('DATA_UNAVAILABLE: schemes search datasource unavailable');
+      }
       logger.warn('RDS failed during search, using local JSON fallback', { err });
       const fs = await import('fs/promises');
       const path = await import('path');
@@ -87,10 +92,23 @@ export const handler: APIGatewayProxyHandler = async (event) => {
 
     const profile = userProfile || {};
     const rankedSchemes = schemes
-      .map((scheme) => ({
-        ...scheme,
-        eligibilityScore: calculateEligibility(profile, scheme.eligibilityCriteria as Record<string, unknown>),
-      }))
+      .map((scheme) => {
+        const result = evaluateEligibility(scheme.eligibilityCriteria as Record<string, any>, {
+          age: profile.age,
+          gender: profile.gender,
+          occupation: profile.occupation,
+          annualIncome: profile.annualIncome,
+          casteCategory: profile.casteCategory,
+          state: profile.state,
+        });
+        return {
+          ...scheme,
+          eligibilityScore: result.score,
+          eligible: result.eligible,
+          matchReasons: result.matchReasons,
+          exclusionReasons: result.exclusionReasons,
+        };
+      })
       .sort((a, b) => (b.eligibilityScore ?? 0) - (a.eligibilityScore ?? 0));
 
     return sendSuccessResponse({
@@ -99,6 +117,10 @@ export const handler: APIGatewayProxyHandler = async (event) => {
     });
   } catch (error) {
     logger.error('Error searching schemes', { error });
+    const msg = String((error as any)?.message || '');
+    if (msg.includes('DATA_UNAVAILABLE')) {
+      return sendErrorResponse(503, 'Live schemes data is temporarily unavailable');
+    }
     return sendErrorResponse(500, 'Internal server error');
   }
 };
@@ -169,50 +191,4 @@ function safeJsonParse(str: string | undefined): Record<string, unknown> {
   }
 }
 
-function calculateEligibility(userProfile: UserProfile, criteria: Record<string, unknown>): number {
-  let score = 0;
-  let total = 0;
-
-  const ageMin = criteria.ageMin as number | undefined;
-  const ageMax = criteria.ageMax as number | undefined;
-  if (ageMin != null && ageMax != null) {
-    total += 20;
-    if (userProfile.age != null && userProfile.age >= ageMin && userProfile.age <= ageMax) {
-      score += 20;
-    }
-  }
-
-  const incomeMax = criteria.incomeMax as number | undefined;
-  if (incomeMax != null) {
-    total += 25;
-    if (userProfile.annualIncome != null && userProfile.annualIncome <= incomeMax) {
-      score += 25;
-    }
-  }
-
-  const gender = criteria.gender as string | undefined;
-  if (gender) {
-    total += 15;
-    if (gender === 'all' || userProfile.gender === gender) {
-      score += 15;
-    }
-  }
-
-  const casteCategories = criteria.casteCategories as string[] | undefined;
-  if (casteCategories?.length) {
-    total += 20;
-    if (userProfile.casteCategory && casteCategories.includes(userProfile.casteCategory)) {
-      score += 20;
-    }
-  }
-
-  const states = criteria.states as string[] | undefined;
-  if (states?.length) {
-    total += 20;
-    if (userProfile.state && states.includes(userProfile.state)) {
-      score += 20;
-    }
-  }
-
-  return total > 0 ? Math.round((score / total) * 100) : 50;
-}
+// calculateEligibility replaced by evaluateEligibility from scheme-eligibility-service.js

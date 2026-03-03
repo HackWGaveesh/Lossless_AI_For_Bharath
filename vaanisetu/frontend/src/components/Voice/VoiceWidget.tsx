@@ -1,59 +1,91 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Mic, MicOff, X } from 'lucide-react';
-import { useQueryClient } from 'react-query';
 import Button from '../Common/Button';
-import { voiceQuery } from '../../services/api';
 import { useLanguage } from '../../contexts/LanguageContext';
-
-const LANG_MAP: Record<string, string> = {
-  en: 'en-IN',
-  hi: 'hi-IN',
-  ta: 'ta-IN',
-  te: 'te-IN',
-  mr: 'mr-IN',
-  kn: 'kn-IN',
-};
+import { useAssistantConversation, LANG_MAP } from '../../hooks/useAssistantConversation';
 
 export default function VoiceWidget() {
   const { language, t, setLanguage } = useLanguage();
-  const queryClient = useQueryClient();
   const langCode = LANG_MAP[language] ?? 'hi-IN';
 
-  const [isOpen, setIsOpen] = useState(true);
+  const {
+    messages,
+    loading: isProcessing,
+    execution,
+    pendingAction: pendingConfirmation,
+    setPendingAction: setPendingConfirmation,
+    budgetMode,
+    responseMode,
+    lastPayload,
+    sendMessage,
+  } = useAssistantConversation({
+    langCode,
+    channel: 'voice_widget',
+    persistMessages: true,
+    sessionStorageKey: 'vaanisetu_assistant_session_id',
+    onLanguageUpdated: setLanguage,
+    errorMessage: t('common.error'),
+  });
+
+  const [isOpen, setIsOpen] = useState(false);
   const [isListening, setIsListening] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
   const [transcript, setTranscript] = useState('');
-  const [responseText, setResponseText] = useState('');
-  const [sessionContext, setSessionContext] = useState<{ role: string; content: string }[]>([]);
   const [slowMessage, setSlowMessage] = useState(false);
   const [textFallback, setTextFallback] = useState('');
   const [speechRecognition, setSpeechRecognition] = useState<any>(null);
-  const [agentTrace, setAgentTrace] = useState<{
-    actionCalled?: string;
-    agentUsed?: boolean;
-    guardrailApplied?: boolean;
-  } | null>(null);
-  const [responseMode, setResponseMode] = useState<'agent' | 'workflow' | 'direct_model' | null>(null);
-  const [execution, setExecution] = useState<{
-    intent?: string;
-    confidence?: number;
-    entities?: Record<string, unknown>;
-    steps?: string[];
-  } | null>(null);
-  const [pendingConfirmation, setPendingConfirmation] = useState<{
-    type?: string;
-    confirmationToken?: string | null;
-    scheme?: Record<string, unknown>;
-    options?: Array<{ id?: string; code?: string; name?: string; benefitRs?: number }>;
-    missingDocuments?: string[];
-  } | null>(null);
-  const [budgetMode, setBudgetMode] = useState<'normal' | 'guarded' | 'strict'>('normal');
-
+  const [localError, setLocalError] = useState<string | null>(null);
+  const prevLoadingRef = useRef(false);
   const mountedRef = useRef(true);
+
+  const agentTrace = lastPayload
+    ? {
+        actionCalled: (lastPayload.agentTrace as any)?.actionCalled ?? null,
+        agentUsed: (lastPayload.agentTrace as any)?.agentUsed ?? (lastPayload.agentUsed ?? false),
+        guardrailApplied: (lastPayload.agentTrace as any)?.guardrailApplied ?? false,
+      }
+    : null;
+  const matchReasons = Array.isArray(lastPayload?.matchReasons) ? (lastPayload.matchReasons as string[]) : [];
+  const serviceTrace = (lastPayload?.serviceTrace as Record<string, unknown>) ?? null;
+
+  const lastAssistantMessage = messages.length > 0 && messages[messages.length - 1].role === 'assistant'
+    ? messages[messages.length - 1].content
+    : '';
+  const responseText = localError ?? lastAssistantMessage;
+
+  useEffect(() => {
+    if (prevLoadingRef.current && !isProcessing && lastAssistantMessage && typeof window !== 'undefined' && window.speechSynthesis) {
+      const utter = new SpeechSynthesisUtterance(lastAssistantMessage);
+      utter.lang = langCode;
+      utter.rate = 0.95;
+      window.speechSynthesis.cancel();
+      setTimeout(() => {
+        if (mountedRef.current) window.speechSynthesis.speak(utter);
+      }, 50);
+    }
+    prevLoadingRef.current = isProcessing;
+  }, [isProcessing, lastAssistantMessage, langCode]);
+
+  useEffect(() => {
+    if (serviceTrace && typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('vaanisetu_lastTrace', JSON.stringify({ ...serviceTrace, timestamp: Date.now() }));
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }, [serviceTrace]);
 
   useEffect(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (SpeechRecognition) {
+      if (speechRecognition) {
+        try {
+          speechRecognition.abort();
+        } catch {
+          /* ignore */
+        }
+      }
+
       const recognition = new SpeechRecognition();
       recognition.continuous = false;
       recognition.interimResults = true;
@@ -61,7 +93,7 @@ export default function VoiceWidget() {
 
       recognition.onstart = () => {
         setIsListening(true);
-        setResponseText('');
+        setLocalError(null);
         setTranscript('');
       };
 
@@ -71,16 +103,17 @@ export default function VoiceWidget() {
         setTranscript(text);
         if (result.isFinal) {
           stopListening();
-          void sendToBackend(text);
+          void sendMessage(text);
         }
       };
 
       recognition.onerror = (event: any) => {
-        console.error('Speech recognition error:', event.error);
         if (event.error === 'not-allowed') {
-          setResponseText('Microphone permission denied. Please allow access.');
+          setLocalError('Microphone permission denied. Please allow access.');
+        } else if (event.error === 'no-speech') {
+          setLocalError('No speech detected. Please try again.');
         } else {
-          setResponseText('Speech error. Please try again or type.');
+          setLocalError('Speech error. Please try again or type below.');
         }
         setIsListening(false);
       };
@@ -91,78 +124,38 @@ export default function VoiceWidget() {
 
       setSpeechRecognition(recognition);
     }
+    return () => {
+      setSpeechRecognition((prev: any) => {
+        if (prev) {
+          try {
+            prev.abort();
+          } catch {
+            /* ignore */
+          }
+        }
+        return null;
+      });
+    };
   }, [langCode]);
 
-  const sessionIdRef = useRef(`vs-${Math.random().toString(36).substring(2, 10)}${Date.now()}`);
-
   const sendToBackend = async (text: string, opts?: { confirmationToken?: string | null }) => {
-    if (!mountedRef.current || !text.trim()) return;
-    setIsProcessing(true);
+    if (!text.trim() || isProcessing) return;
+    setLocalError(null);
     setSlowMessage(false);
     const slowTimer = setTimeout(() => {
       if (mountedRef.current) setSlowMessage(true);
     }, 5000);
-
     try {
-      const res = await voiceQuery({
-        transcript: text,
-        language: langCode,
-        sessionContext: sessionContext.slice(-6),
-        sessionId: sessionIdRef.current,
-        channel: 'voice_widget',
-        idempotencyKey: `voice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        confirmationToken: opts?.confirmationToken || undefined,
-      });
-      if (!mountedRef.current) return;
-
-      const payload = (res as any).data || res;
-      const reply = payload.responseText ?? t('common.error');
-      const trace = {
-        actionCalled: payload.agentTrace?.actionCalled ?? null,
-        agentUsed: payload.agentUsed ?? false,
-        guardrailApplied: payload.guardrailApplied ?? false,
-      };
-
-      setResponseText(reply);
-      setAgentTrace(trace);
-      setResponseMode(payload.responseMode ?? (trace.agentUsed ? 'agent' : 'direct_model'));
-      setExecution(payload.execution ?? null);
-      setPendingConfirmation(payload.pendingConfirmation ?? null);
-      setBudgetMode(payload.budgetMode ?? 'normal');
-      setSessionContext((prev) => [...prev.slice(-8), { role: 'user', content: text }, { role: 'assistant', content: reply }]);
-
-      const maybeLang = String(payload.execution?.entities?.preferredLanguage || payload.pendingConfirmation?.preferredLanguage || '').trim();
-      if (payload.actionResultType === 'language_updated' && ['en', 'hi', 'ta', 'te', 'mr', 'kn'].includes(maybeLang)) {
-        setLanguage(maybeLang as any);
-      }
-
-      if (payload.applicationSubmitted) {
-        queryClient.invalidateQueries('applications');
-        queryClient.invalidateQueries('userStats');
-      }
-
-      if (typeof window !== 'undefined' && window.speechSynthesis) {
-        const utter = new SpeechSynthesisUtterance(reply);
-        utter.lang = langCode;
-        utter.rate = 1.0;
-        window.speechSynthesis.cancel();
-        window.speechSynthesis.speak(utter);
-      }
-    } catch (err) {
-      console.error('Voice query error:', err);
-      if (mountedRef.current) setResponseText(t('common.error'));
+      await sendMessage(text, opts);
     } finally {
       clearTimeout(slowTimer);
-      if (mountedRef.current) {
-        setIsProcessing(false);
-        setSlowMessage(false);
-      }
+      if (mountedRef.current) setSlowMessage(false);
     }
   };
 
   const startListening = () => {
     if (!speechRecognition) {
-      setResponseText('Speech recognition not supported in this browser.');
+      setLocalError('Speech recognition not supported in this browser.');
       return;
     }
     try {
@@ -177,7 +170,7 @@ export default function VoiceWidget() {
       try {
         speechRecognition.stop();
       } catch {
-        // ignore
+        /* ignore */
       }
     }
     setIsListening(false);
@@ -198,10 +191,11 @@ export default function VoiceWidget() {
     return (
       <button
         onClick={() => setIsOpen(true)}
-        className="fixed bottom-20 md:bottom-6 right-6 w-16 h-16 bg-primary-500 text-white rounded-full shadow-primary hover:shadow-primary-hover transition-all hover:-translate-y-px flex items-center justify-center z-50 voice-pulse"
-        aria-label="Open voice assistant"
+        className="fixed bottom-20 md:bottom-6 right-6 px-4 h-12 bg-primary-500 text-white rounded-full shadow-primary hover:shadow-primary-hover transition-all hover:-translate-y-px flex items-center justify-center gap-2 z-50"
+        aria-label="Open assistant launcher"
       >
         <Mic className="w-6 h-6" />
+        <span className="text-sm font-medium">Assistant</span>
       </button>
     );
   }
@@ -210,9 +204,14 @@ export default function VoiceWidget() {
     <div className="fixed bottom-20 md:bottom-6 right-6 w-96 bg-surface-card rounded-card shadow-card z-50 overflow-hidden border border-surface-border">
       <div className="bg-primary-500 text-white p-4 flex items-center justify-between">
         <h3 className="font-semibold font-sans">{t('voice.title')}</h3>
-        <button onClick={() => setIsOpen(false)} className="hover:bg-primary-400 p-1 rounded" aria-label="Close">
-          <X className="w-5 h-5" />
-        </button>
+        <div className="flex items-center gap-2">
+          <a href="/assistant" className="text-xs bg-primary-400 hover:bg-primary-300 px-2 py-1 rounded">
+            Open Full Chat
+          </a>
+          <button onClick={() => setIsOpen(false)} className="hover:bg-primary-400 p-1 rounded" aria-label="Close">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
       </div>
 
       <div className="p-4 bg-surface-elevated">
@@ -278,16 +277,53 @@ export default function VoiceWidget() {
             )}
             {execution && (
               <div className="mt-3 rounded-lg border border-surface-border bg-surface-bg p-2 text-xs text-text-secondary space-y-1">
-                <div><span className="font-medium">Intent:</span> {execution.intent || '-'}</div>
-                <div><span className="font-medium">Confidence:</span> {typeof execution.confidence === 'number' ? `${Math.round(execution.confidence * 100)}%` : '-'}</div>
-                <div><span className="font-medium">Steps:</span> {Array.isArray(execution.steps) ? execution.steps.join(' -> ') : '-'}</div>
+                <div><span className="font-medium">State:</span> {(execution as any).state || '-'}</div>
+                <div><span className="font-medium">Intent:</span> {(execution as any).intent || '-'}</div>
+                <div><span className="font-medium">Confidence:</span> {typeof (execution as any).confidence === 'number' ? `${Math.round((execution as any).confidence * 100)}%` : '-'}</div>
+                <div><span className="font-medium">Steps:</span> {Array.isArray((execution as any).steps) ? (execution as any).steps.join(' -> ') : '-'}</div>
               </div>
             )}
-            {pendingConfirmation?.type === 'scheme_disambiguation' && Array.isArray(pendingConfirmation.options) && pendingConfirmation.options.length > 0 && (
+            {matchReasons.length > 0 && (
+              <div className="mt-2">
+                <p className="text-xs text-text-muted mb-1">Eligibility match:</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {matchReasons.map((reason, i) => (
+                    <span key={i} className="inline-flex items-center text-xs bg-green-50 text-green-700 border border-green-200 rounded-full px-2 py-0.5">
+                      ✓ {reason}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {serviceTrace && ((serviceTrace as any).model || (serviceTrace as any).latencyMs) && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {(serviceTrace as any).model && (
+                  <span className="inline-flex items-center text-xs bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-full px-2 py-0.5">
+                    🤖 {(serviceTrace as any).model.replace('us.amazon.', 'Amazon ')}
+                  </span>
+                )}
+                {(serviceTrace as any).region && (
+                  <span className="inline-flex items-center text-xs bg-orange-50 text-orange-700 border border-orange-200 rounded-full px-2 py-0.5">
+                    🌐 {(serviceTrace as any).region}
+                  </span>
+                )}
+                {(serviceTrace as any).latencyMs != null && (serviceTrace as any).latencyMs > 0 && (
+                  <span className="inline-flex items-center text-xs bg-slate-50 text-slate-600 border border-slate-200 rounded-full px-2 py-0.5">
+                    ⚡ {(serviceTrace as any).latencyMs}ms
+                  </span>
+                )}
+                {((serviceTrace as any).inputTokens || (serviceTrace as any).outputTokens) && (
+                  <span className="inline-flex items-center text-xs bg-slate-50 text-slate-600 border border-slate-200 rounded-full px-2 py-0.5">
+                    🔢 {((serviceTrace as any).inputTokens ?? 0) + ((serviceTrace as any).outputTokens ?? 0)} tokens
+                  </span>
+                )}
+              </div>
+            )}
+            {pendingConfirmation?.type === 'scheme_disambiguation' && Array.isArray(pendingConfirmation.options) && (pendingConfirmation.options as any[]).length > 0 && (
               <div className="mt-3 rounded-lg border border-surface-border bg-surface-bg p-2 space-y-2">
                 <p className="text-xs font-medium text-text-secondary">Pick one scheme:</p>
                 <div className="flex flex-wrap gap-2">
-                  {pendingConfirmation.options.slice(0, 3).map((opt) => (
+                  {(pendingConfirmation.options as any[]).slice(0, 3).map((opt) => (
                     <button
                       key={`${opt.id || opt.code || opt.name}`}
                       onClick={() => {
@@ -314,7 +350,7 @@ export default function VoiceWidget() {
                     onClick={() => {
                       const name = (pendingConfirmation.scheme as any)?.nameEn || (pendingConfirmation.scheme as any)?.name || 'this scheme';
                       setTranscript(`confirm application for ${name}`);
-                      void sendToBackend(`confirm application for ${name}`, { confirmationToken: pendingConfirmation.confirmationToken || null });
+                      void sendToBackend(`confirm application for ${name}`, { confirmationToken: (pendingConfirmation.confirmationToken as string) || null });
                     }}
                   >
                     Confirm
@@ -324,7 +360,6 @@ export default function VoiceWidget() {
                     className="flex-1"
                     onClick={() => {
                       setPendingConfirmation(null);
-                      setResponseText('Application cancelled. You can ask me to apply again anytime.');
                     }}
                   >
                     Cancel

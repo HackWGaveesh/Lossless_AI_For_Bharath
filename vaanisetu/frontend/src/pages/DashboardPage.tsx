@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useQuery } from 'react-query';
+import { Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
 import StatsCard from '../components/Dashboard/StatsCard';
@@ -69,6 +70,14 @@ export default function DashboardPage() {
             ? `${t('dashboard.pending_action')}: ${pendingAction.application_id} - ${pendingAction.scheme_name || pendingAction.scheme_code || pendingAction.scheme_id}`
             : t('dashboard.no_applications')}
         </p>
+        <div className="mt-4">
+          <Link
+            to="/assistant"
+            className="inline-flex items-center rounded-lg border border-primary-300 bg-primary-50 px-3 py-1.5 text-sm font-medium text-primary-700 hover:bg-primary-100"
+          >
+            Open Assistant Chat
+          </Link>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">

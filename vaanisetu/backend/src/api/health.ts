@@ -1,8 +1,9 @@
-import type { APIGatewayProxyHandler } from 'aws-lambda';
+﻿import type { APIGatewayProxyHandler } from 'aws-lambda';
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
 import { DynamoDBClient, DescribeTableCommand } from '@aws-sdk/client-dynamodb';
 import { logger } from '../utils/logger.js';
 import { sendSuccessResponse } from '../utils/responses.js';
+import { getRuntimeBudgetMode } from '../services/runtime-config-service.js';
 
 const rds = new RDSDataClient({ region: process.env.REGION });
 const dynamo = new DynamoDBClient({ region: process.env.REGION });
@@ -10,6 +11,7 @@ const dynamo = new DynamoDBClient({ region: process.env.REGION });
 export const handler: APIGatewayProxyHandler = async () => {
   const checks: Record<string, { status: string; latencyMs?: number; error?: string }> = {};
   let overall = 'ok';
+  const runtimeBudgetMode = await getRuntimeBudgetMode();
 
   try {
     const dbStart = Date.now();
@@ -46,10 +48,29 @@ export const handler: APIGatewayProxyHandler = async () => {
     checks,
     bedrockAgentId: process.env.BEDROCK_AGENT_ID ? 'configured' : null,
     bedrockAgentAlias: process.env.BEDROCK_AGENT_ALIAS_ID || 'TSTALIASID',
+    budgetMode: runtimeBudgetMode,
     guardrailsEnabled: !!process.env.BEDROCK_GUARDRAIL_ID,
     model: 'us.amazon.nova-pro-v1:0',
-    agentActions: ['getSchemesByProfile', 'createApplication', 'getApplicationStatus', 'getJobsByProfile'],
-    kycPipeline: '10-step: structural→textract→rekognition→novaProFraud',
+    agentActions: [
+      'resolveScheme',
+      'getSchemeDetails',
+      'getSchemesByProfile',
+      'prepareApplication',
+      'confirmApplication',
+      'submitApplication',
+      'getApplicationStatus',
+      'getJobsByProfile',
+      'updateUserProfile',
+      'updateUserProfilePatch',
+      'setPreferredLanguage',
+      'collectProfileGaps',
+      'getRequiredDocuments',
+      'requestDocumentUploadSlot',
+      'verifyDocument',
+      'getUserApplicationsSummary',
+    ],
+    kycPipeline: '10-step: structural->textract->rekognition->novaProFraud',
     awsServicesCount: 15,
   });
 };
+

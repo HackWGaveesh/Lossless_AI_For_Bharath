@@ -65,12 +65,13 @@ CAPABILITIES:
 
 RULES:
 1. Always respond in the user's language (Hindi/Tamil/Telugu/Kannada/Marathi/English)
-2. When user asks about schemes, CALL getSchemesByProfile
+2. When user asks about schemes, CALL getSchemesByProfile — always include age, gender, casteCategory, annualIncome
 3. When user wants to apply, CALL createApplication
 4. When user asks about jobs, CALL getJobsByProfile
 5. Keep responses concise — max 3 sentences. Rural users have limited time.
 6. Always mention the benefit amount (Rs X per year) when discussing schemes.
-7. Be warm and encouraging.`
+7. Be warm and encouraging.
+8. IMPORTANT: Only suggest schemes returned by getSchemesByProfile. Do NOT suggest schemes not in the returned list.`
         }));
 
         const agentId = agentResp.agent?.agentId!;
@@ -89,22 +90,26 @@ RULES:
                 functions: [
                     {
                         name: 'getSchemesByProfile',
-                        description: 'Find schemes user qualifies for based on demographics',
+                        description: 'Find government schemes user qualifies for based on demographics. Returns eligible schemes only (ineligible ones are filtered out). Each scheme includes matchReasons explaining why the user qualifies. Uses OR-logic for schemes like Stand-Up India that require SC/ST caste OR female gender.',
                         parameters: {
-                            age: { type: 'integer', description: 'User age', required: false },
-                            annualIncome: { type: 'integer', description: 'Annual household income Rs', required: false },
+                            age: { type: 'integer', description: 'User age in years', required: false },
+                            annualIncome: { type: 'integer', description: 'Annual household income in Rs', required: false },
                             gender: { type: 'string', description: 'male/female/other', required: false },
-                            state: { type: 'string', description: 'State name', required: false },
-                            occupation: { type: 'string', description: 'farmer, student, salaried, unemployed', required: false }
+                            state: { type: 'string', description: 'State name e.g. Bihar, Tamil Nadu', required: false },
+                            occupation: { type: 'string', description: 'farmer, student, salaried, unemployed, entrepreneur', required: false },
+                            casteCategory: { type: 'string', description: 'SC/ST/OBC/General/Minority — required for correct eligibility filtering', required: false }
                         }
                     },
                     {
                         name: 'createApplication',
-                        description: 'Submit an application',
+                        description: 'Prepare or submit an application. Always perform lookup/prepare first and submit only after explicit confirmation.',
                         parameters: {
                             userId: { type: 'string', description: 'User ID', required: true },
-                            schemeId: { type: 'string', description: 'Scheme ID', required: true },
-                            schemeName: { type: 'string', description: 'Scheme Name', required: false }
+                            query: { type: 'string', description: 'Scheme name or hint from user utterance', required: false },
+                            schemeId: { type: 'string', description: 'Scheme ID if already resolved', required: false },
+                            schemeName: { type: 'string', description: 'Scheme Name if already resolved', required: false },
+                            confirmationToken: { type: 'string', description: 'Confirmation token from prepare step', required: false },
+                            confirm: { type: 'string', description: 'true only after explicit user confirmation', required: false }
                         }
                     },
                     {

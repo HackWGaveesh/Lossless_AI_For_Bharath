@@ -11,11 +11,15 @@ export const api = axios.create({
 
 api.interceptors.request.use(async (config) => {
   const token = await getAuthTokenForApi();
+  const userId = getApiUserId();
+
+  // Keep bearer token when available for future authorizer support.
   if (token && token !== 'dev-token') {
     config.headers.Authorization = `Bearer ${token}`;
-  } else {
-    const userId = getApiUserId();
-    if (userId) config.headers['X-User-Id'] = userId;
+  }
+  // Backend identity currently relies on X-User-Id for all routes.
+  if (userId) {
+    config.headers['X-User-Id'] = userId;
   }
   return config;
 });
@@ -170,6 +174,7 @@ export async function voiceQuery(params: {
   language?: string;
   sessionContext?: { role: string; content: string }[];
   sessionId?: string;
+  messageId?: string;
   idempotencyKey?: string;
   channel?: string;
   forceLanguage?: string;
@@ -189,12 +194,17 @@ export async function voiceQuery(params: {
       options?: Array<{ id?: string; code?: string; name?: string; benefitRs?: number }>;
       missingDocuments?: string[];
     } | null;
+    pendingAction?: Record<string, unknown> | null;
+    cards?: Array<Record<string, unknown>>;
     execution?: {
+      state?: string;
       intent?: string;
       confidence?: number;
       entities?: Record<string, unknown>;
       steps?: string[];
     } | null;
+    messages?: Array<{ role: string; content: string; timestamp?: number }>;
+    grounding?: { sources?: string[] };
     actionResultType?: string | null;
     budgetMode?: 'normal' | 'guarded' | 'strict';
     agentTrace?: { actionCalled?: string; agentUsed?: boolean } | null;
@@ -242,12 +252,17 @@ export interface Job {
 }
 
 export async function fetchProfile() {
-  const { data } = await api.get<{ success: boolean; data: { profile: Record<string, unknown> } }>('/user/profile');
+  const userId = getApiUserId();
+  const { data } = await api.get<{ success: boolean; data: { profile: Record<string, unknown> } }>('/user/profile', {
+    params: userId ? { userId } : {},
+  });
   return data;
 }
 
 export async function updateProfile(profile: Record<string, unknown>) {
-  const { data } = await api.put<{ success: boolean; data: { profile: Record<string, unknown> } }>('/user/profile', profile);
+  const userId = getApiUserId();
+  const payload = userId ? { ...profile, userId } : profile;
+  const { data } = await api.put<{ success: boolean; data: { profile: Record<string, unknown> } }>('/user/profile', payload);
   return data;
 }
 

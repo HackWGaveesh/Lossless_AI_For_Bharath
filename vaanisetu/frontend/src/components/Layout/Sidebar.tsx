@@ -13,7 +13,7 @@ const navRoutes = [
   { to: '/applications', icon: FolderOpen, key: 'nav.applications' },
   { to: '/documents', icon: Image, key: 'nav.documents' },
   { to: '/jobs', icon: Briefcase, key: 'nav.jobs' },
-  { to: '/agents', icon: Bot, key: 'nav.agents' },
+  { to: '/assistant', icon: Bot, key: 'nav.agents' },
   { to: '/profile', icon: User, key: 'nav.profile' },
 ];
 

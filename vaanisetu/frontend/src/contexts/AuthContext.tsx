@@ -55,11 +55,25 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
-function authUserToUser(a: AuthUser): User {
+function normalizePhone(value: unknown): string | undefined {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return undefined;
+  if (/^[0-9a-f-]{30,}$/i.test(raw)) return undefined;
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length < 10 || digits.length > 13) return undefined;
+  return digits.length === 10 ? `+91${digits}` : `+${digits}`;
+}
+
+function authUserToUser(a: AuthUser, claims?: Record<string, unknown>): User {
+  const claimName = typeof claims?.name === 'string' ? claims.name.trim() : '';
+  const claimPhone = normalizePhone(claims?.phone_number);
+  const claimEmail = typeof claims?.email === 'string' ? claims.email : undefined;
+  const fallbackName = (a as unknown as { username?: string }).username ?? 'User';
   return {
     id: a.userId ?? (a as unknown as { username?: string }).username ?? '',
-    name: (a as unknown as { username?: string }).username ?? 'User',
-    phone: (a as unknown as { username?: string }).username ?? undefined,
+    name: claimName || fallbackName,
+    email: claimEmail,
+    phone: claimPhone,
   };
 }
 
@@ -104,9 +118,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       const currentUser = await getCurrentUser();
-      setUser(authUserToUser(currentUser));
-      const uid = currentUser.userId ?? (currentUser as unknown as { username?: string }).username ?? null;
-      setUserId(uid ?? null);
+      const session = await fetchAuthSession();
+      const claims = (session.tokens?.idToken?.payload ?? {}) as Record<string, unknown>;
+      const nextUser = authUserToUser(currentUser, claims);
+      setUser(nextUser);
+      setUserId(nextUser.id || null);
     } catch {
       setUser(null);
       setUserId(null);
@@ -143,9 +159,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const result = await confirmSignIn({ challengeResponse: otp });
     if (result.isSignedIn) {
       const currentUser = await getCurrentUser();
-      setUser(authUserToUser(currentUser));
-      const uid = currentUser.userId ?? (currentUser as unknown as { username?: string }).username ?? null;
-      setUserId(uid ?? null);
+      const session = await fetchAuthSession();
+      const claims = (session.tokens?.idToken?.payload ?? {}) as Record<string, unknown>;
+      const nextUser = authUserToUser(currentUser, claims);
+      setUser(nextUser);
+      setUserId(nextUser.id || null);
     }
   }, []);
 

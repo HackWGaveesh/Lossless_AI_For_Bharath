@@ -35,6 +35,10 @@ export const handler: APIGatewayProxyHandler = async (event) => {
         ],
       });
 
+      if (prepared?.code === 'DATA_UNAVAILABLE') {
+        return sendErrorResponse(503, prepared?.message || 'Live application data is temporarily unavailable');
+      }
+
       return sendSuccessResponse({
         needsConfirmation: prepared?.code === 'NEEDS_CONFIRMATION',
         confirmationToken: prepared.confirmationToken ?? null,
@@ -61,6 +65,10 @@ export const handler: APIGatewayProxyHandler = async (event) => {
         { name: 'idempotencyKey', value: effectiveIdempotencyKey },
       ],
     });
+
+    if (submitted?.code === 'DATA_UNAVAILABLE') {
+      return sendErrorResponse(503, submitted?.message || 'Live application data is temporarily unavailable');
+    }
 
     if (!submitted?.success) {
       return sendSuccessResponse({

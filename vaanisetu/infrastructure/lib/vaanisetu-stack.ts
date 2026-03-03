@@ -10,6 +10,7 @@ import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as sns from 'aws-cdk-lib/aws-sns';
+import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as lambdaNode from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -103,6 +104,16 @@ export class VaaniSetuStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    const runtimeConfigTable = new dynamodb.Table(this, 'RuntimeConfigTable', {
+      tableName: 'vaanisetu-runtime-config',
+      partitionKey: { name: 'config_key', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
+      encryptionKey: kmsKey,
+      timeToLiveAttribute: 'ttl',
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
     const applicationsTable = new dynamodb.Table(this, 'ApplicationsTable', {
       tableName: 'vaanisetu-applications',
       partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
@@ -177,6 +188,7 @@ export class VaaniSetuStack extends cdk.Stack {
     }));
     usersTable.grantReadWriteData(lambdaExecutionRole);
     sessionsTable.grantReadWriteData(lambdaExecutionRole);
+    runtimeConfigTable.grantReadWriteData(lambdaExecutionRole);
     applicationsTable.grantReadWriteData(lambdaExecutionRole);
     documentsTable.grantReadWriteData(lambdaExecutionRole);
     documentsBucket.grantReadWrite(lambdaExecutionRole);
@@ -369,6 +381,8 @@ exports.handler = async (event) => {
       logRetention: logs.RetentionDays.ONE_WEEK,
       environment: {
         USERS_TABLE: usersTable.tableName,
+        SESSIONS_TABLE: sessionsTable.tableName,
+        RUNTIME_CONFIG_TABLE: runtimeConfigTable.tableName,
         APPLICATIONS_TABLE: applicationsTable.tableName,
         DB_CLUSTER_ARN: dbCluster.clusterArn,
         DB_SECRET_ARN: dbCluster.secret!.secretArn,
@@ -376,6 +390,7 @@ exports.handler = async (event) => {
         REGION: this.region,
         NOTIFICATION_TOPIC_ARN: notificationTopic.topicArn,
         BUDGET_MODE: budgetMode,
+        ALLOW_LOCAL_DATA_FALLBACK: String(process.env.ALLOW_LOCAL_DATA_FALLBACK || 'false').toLowerCase(),
       },
     };
 
@@ -606,6 +621,19 @@ exports.handler = async (event) => {
     });
     api.root.addResource('health').addMethod('GET', new apigateway.LambdaIntegration(healthFn));
 
+    const budgetModeNotifierFn = new lambdaNode.NodejsFunction(this, 'BudgetModeNotifierFunction', {
+      ...nodeOptions,
+      entry: path.join(backendPath, 'api/budget/notify.ts'),
+      handler: 'handler',
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
+      environment: {
+        ...nodeOptions.environment,
+        RUNTIME_CONFIG_TABLE: runtimeConfigTable.tableName,
+      },
+    });
+    notificationTopic.addSubscription(new snsSubscriptions.LambdaSubscription(budgetModeNotifierFn));
+
     notificationTopic.grantPublish(lambdaExecutionRole);
     notificationTopic.addToResourcePolicy(new iam.PolicyStatement({
       principals: [new iam.ServicePrincipal('budgets.amazonaws.com')],
@@ -615,7 +643,7 @@ exports.handler = async (event) => {
 
     new budgets.CfnBudget(this, 'VaaniSetuMonthlyBudget', {
       budget: {
-        budgetName: `VaaniSetu-Monthly-${this.account}`,
+        budgetName: `VaaniSetu-Monthly-${this.account}-v2`,
         budgetType: 'COST',
         timeUnit: 'MONTHLY',
         budgetLimit: {
@@ -628,7 +656,7 @@ exports.handler = async (event) => {
           comparisonOperator: 'GREATER_THAN',
           notificationType: 'FORECASTED',
           threshold,
-          thresholdType: 'PERCENTAGE',
+          thresholdType: 'ABSOLUTE_VALUE',
         },
         subscribers: [
           {
@@ -697,6 +725,7 @@ exports.handler = async (event) => {
       jobsMatchFn,
       userProfileFn,
       healthFn,
+      budgetModeNotifierFn,
     ];
 
     // Agent Action Group Lambda — invoked by Bedrock Agent for real data actions
@@ -814,6 +843,11 @@ exports.handler = async (event) => {
       value: notificationTopic.topicArn,
       description: 'SNS Topic ARN for user notifications',
       exportName: 'VaaniSetuNotificationTopicArn',
+    });
+    new cdk.CfnOutput(this, 'RuntimeConfigTableName', {
+      value: runtimeConfigTable.tableName,
+      description: 'DynamoDB table for runtime controls like budget mode',
+      exportName: 'VaaniSetuRuntimeConfigTable',
     });
   }
 }

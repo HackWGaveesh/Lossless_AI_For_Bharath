@@ -1,13 +1,50 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../services/api';
+
+interface ServiceCheck { status: string; latencyMs?: number; }
+interface HealthData {
+  status: string;
+  checks: { aurora?: ServiceCheck; dynamodb?: ServiceCheck };
+  bedrockAgentId: string | null;
+  guardrailsEnabled: boolean;
+  model: string;
+  agentActions: string[];
+  awsServicesCount?: number;
+}
+interface TraceData {
+  model?: string;
+  region?: string;
+  latencyMs?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  guardrailId?: string;
+  guardrailTriggered?: boolean;
+  timestamp?: number;
+}
 
 export default function AgentPage() {
     const [agentStatus, setAgentStatus] = useState<'active' | 'fallback' | 'loading'>('loading');
+    const [healthData, setHealthData] = useState<HealthData | null>(null);
+    const [lastTrace, setLastTrace] = useState<TraceData | null>(() => {
+        try { const s = localStorage.getItem('vaanisetu_lastTrace'); return s ? JSON.parse(s) : null; } catch { return null; }
+    });
+    const traceInterval = useRef<ReturnType<typeof setInterval> | null>(null);
 
     useEffect(() => {
         api.get('/health').then((r: any) => {
-            setAgentStatus(r.data?.data?.bedrockAgentId === 'configured' ? 'active' : 'fallback');
+            const d: HealthData = r.data?.data;
+            setHealthData(d ?? null);
+            setAgentStatus(d?.bedrockAgentId === 'configured' ? 'active' : 'fallback');
         }).catch(() => setAgentStatus('fallback'));
+
+        // poll localStorage for new trace data written by VoiceWidget
+        traceInterval.current = setInterval(() => {
+            try {
+                const s = localStorage.getItem('vaanisetu_lastTrace');
+                if (s) { const t = JSON.parse(s); setLastTrace(t); }
+            } catch { /* ignore */ }
+        }, 2000);
+        return () => { if (traceInterval.current) clearInterval(traceInterval.current); };
     }, []);
 
     const pipeline = [
@@ -56,34 +93,102 @@ export default function AgentPage() {
             </div>
 
             {/* Agent Status */}
-            <div className={`rounded-xl p-4 border flex items-center gap-3 ${agentStatus === 'active'
+            <div className={`rounded-xl p-4 border ${agentStatus === 'active'
                     ? 'bg-emerald-50 border-emerald-200'
                     : agentStatus === 'fallback'
                         ? 'bg-amber-50 border-amber-200'
                         : 'bg-gray-50 border-gray-200'
                 }`}>
-                <span className="text-2xl">
-                    {agentStatus === 'active' ? '✅' : agentStatus === 'fallback' ? '⚙️' : '⏳'}
-                </span>
-                <div>
-                    <p className="font-semibold">
-                        {agentStatus === 'active'
-                            ? 'Bedrock Orchestrator Agent — Live'
-                            : agentStatus === 'fallback'
-                                ? 'Direct Nova Pro mode (Agent setup pending)'
-                                : 'Checking agent status...'}
-                    </p>
-                    <p className="text-sm mt-0.5 opacity-75">
-                        Foundation Model: us.amazon.nova-pro-v1:0 · Region: ap-south-1 (India)
-                    </p>
+                <div className="flex items-center gap-3">
+                    <span className="text-2xl">
+                        {agentStatus === 'active' ? '✅' : agentStatus === 'fallback' ? '⚙️' : '⏳'}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                        <p className="font-semibold">
+                            {agentStatus === 'active'
+                                ? 'Bedrock Orchestrator Agent — Live'
+                                : agentStatus === 'fallback'
+                                    ? 'Direct Nova Pro mode (Agent setup pending)'
+                                    : 'Checking agent status...'}
+                        </p>
+                        <p className="text-sm mt-0.5 opacity-75">
+                            Foundation Model: {healthData?.model ?? 'us.amazon.nova-pro-v1:0'} · Region: ap-south-1 (India)
+                        </p>
+                    </div>
                 </div>
+                {/* Per-service health badges */}
+                {healthData && (
+                    <div className="flex flex-wrap gap-2 mt-3">
+                        <span className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded-full font-medium ${
+                            healthData.checks.aurora?.status === 'up' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                        }`}>
+                            🗄️ Aurora{healthData.checks.aurora?.latencyMs != null ? ` ${healthData.checks.aurora.latencyMs}ms` : ''}
+                            {' '}{healthData.checks.aurora?.status === 'up' ? '●' : '○'}
+                        </span>
+                        <span className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded-full font-medium ${
+                            healthData.checks.dynamodb?.status === 'up' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                        }`}>
+                            ⚡ DynamoDB{healthData.checks.dynamodb?.latencyMs != null ? ` ${healthData.checks.dynamodb.latencyMs}ms` : ''}
+                            {' '}{healthData.checks.dynamodb?.status === 'up' ? '●' : '○'}
+                        </span>
+                        <span className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded-full font-medium ${
+                            agentStatus === 'active' ? 'bg-violet-100 text-violet-800' : 'bg-amber-100 text-amber-800'
+                        }`}>
+                            🤖 Bedrock Agent {agentStatus === 'active' ? '●' : '○'}
+                        </span>
+                        <span className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded-full font-medium ${
+                            healthData.guardrailsEnabled ? 'bg-purple-100 text-purple-800' : 'bg-gray-100 text-gray-500'
+                        }`}>
+                            🛡️ Guardrails {healthData.guardrailsEnabled ? 'ON ●' : 'OFF ○'}
+                        </span>
+                    </div>
+                )}
             </div>
+
+            {/* Last AI Response Stats */}
+            {lastTrace && (lastTrace.latencyMs || lastTrace.model) && (
+                <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4">
+                    <h2 className="text-sm font-semibold text-indigo-800 mb-2">⚡ Last AI Response</h2>
+                    <div className="flex flex-wrap gap-2">
+                        {lastTrace.model && (
+                            <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full font-medium">
+                                🤖 {lastTrace.model.replace('us.amazon.', 'Amazon ')}
+                            </span>
+                        )}
+                        {lastTrace.region && (
+                            <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-full font-medium">
+                                🌐 {lastTrace.region}
+                            </span>
+                        )}
+                        {lastTrace.latencyMs != null && lastTrace.latencyMs > 0 && (
+                            <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-1 rounded-full font-medium">
+                                ⚡ {lastTrace.latencyMs}ms
+                            </span>
+                        )}
+                        {(lastTrace.inputTokens || lastTrace.outputTokens) && (
+                            <span className="text-xs bg-amber-100 text-amber-700 px-2 py-1 rounded-full font-medium">
+                                🔢 {(lastTrace.inputTokens ?? 0) + (lastTrace.outputTokens ?? 0)} tokens
+                            </span>
+                        )}
+                        {lastTrace.guardrailId && (
+                            <span className="text-xs bg-purple-100 text-purple-700 px-2 py-1 rounded-full font-medium">
+                                🛡️ Guardrails {lastTrace.guardrailTriggered ? 'triggered' : 'passed'}
+                            </span>
+                        )}
+                        {lastTrace.timestamp && (
+                            <span className="text-xs bg-gray-100 text-gray-500 px-2 py-1 rounded-full">
+                                {new Date(lastTrace.timestamp).toLocaleTimeString()}
+                            </span>
+                        )}
+                    </div>
+                </div>
+            )}
 
             {/* Stats */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 {[
-                    { n: '15', label: 'AWS Services' },
-                    { n: '4', label: 'Agent Actions' },
+                    { n: String(healthData?.awsServicesCount ?? 15), label: 'AWS Services' },
+                    { n: String(healthData?.agentActions?.length ?? 4), label: 'Agent Actions' },
                     { n: '6', label: 'Languages' },
                     { n: '25', label: 'Schemes in KB' },
                 ].map(s => (

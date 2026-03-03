@@ -4,6 +4,7 @@ import { logger } from '../../utils/logger.js';
 import { sendSuccessResponse, sendErrorResponse } from '../../utils/responses.js';
 
 const rds = new RDSDataClient({ region: process.env.REGION });
+const ALLOW_LOCAL_DATA_FALLBACK = process.env.ALLOW_LOCAL_DATA_FALLBACK === 'true';
 
 export const handler: APIGatewayProxyHandler = async (event) => {
   try {
@@ -56,6 +57,9 @@ export const handler: APIGatewayProxyHandler = async (event) => {
         createdAt: row[9]?.stringValue,
       }));
     } catch (dbError) {
+      if (!ALLOW_LOCAL_DATA_FALLBACK) {
+        throw new Error('DATA_UNAVAILABLE: jobs datasource unavailable');
+      }
       logger.warn('RDS failed, using local JSON fallback for jobs', { dbError });
       const fs = await import('fs/promises');
       const path = await import('path');
@@ -80,6 +84,10 @@ export const handler: APIGatewayProxyHandler = async (event) => {
     return sendSuccessResponse({ jobs, total: jobs.length });
   } catch (error) {
     logger.error('Jobs list error', { error });
+    const msg = String((error as any)?.message || '');
+    if (msg.includes('DATA_UNAVAILABLE')) {
+      return sendErrorResponse(503, 'Live jobs data is temporarily unavailable');
+    }
     return sendErrorResponse(500, 'Failed to list jobs');
   }
 };
