@@ -1,9 +1,29 @@
 import { useEffect, useRef, useState } from 'react';
-import { Mic, MicOff, Send } from 'lucide-react';
+import { Mic, MicOff, Send, Globe, Clock, Database, Cpu, CheckCircle, AlertCircle, Loader } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import Button from '../components/Common/Button';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAssistantConversation, LANG_MAP } from '../hooks/useAssistantConversation';
+
+type SupportedLang = 'en' | 'hi' | 'ta' | 'te' | 'mr' | 'kn';
+
+const LANG_LABELS: Record<SupportedLang, string> = {
+  en: 'English',
+  hi: 'हिंदी',
+  ta: 'தமிழ்',
+  te: 'తెలుగు',
+  mr: 'मराठी',
+  kn: 'ಕನ್ನಡ',
+};
+
+const QUICK_PROMPTS: Record<SupportedLang, string[]> = {
+  en: ['Hi', 'Show schemes for me', 'Find jobs', 'Check my application status'],
+  hi: ['नमस्ते', 'मेरे लिए योजनाएं दिखाओ', 'नौकरी ढूंढो', 'मेरा आवेदन कहां है'],
+  ta: ['வணக்கம்', 'திட்டங்கள் காட்டு', 'வேலைகள் தேடு', 'விண்ணப்ப நிலை'],
+  te: ['నమస్కారం', 'పథకాలు చూపించు', 'ఉద్యోగాలు', 'దరఖాస్తు స్థితి'],
+  mr: ['नमस्कार', 'योजना दाखवा', 'नोकरी शोधा', 'अर्ज स्थिती'],
+  kn: ['ನಮಸ್ಕಾರ', 'ಯೋಜನೆಗಳು', 'ಉದ್ಯೋಗ ಹುಡುಕಿ', 'ಅರ್ಜಿ ಸ್ಥಿತಿ'],
+};
 
 export default function AssistantPage() {
   const { language, t, setLanguage } = useLanguage();
@@ -20,6 +40,7 @@ export default function AssistantPage() {
     budgetMode,
     responseMode,
     sendMessage,
+    lastPayload,
   } = useAssistantConversation({
     langCode,
     channel: 'assistant_page',
@@ -31,6 +52,7 @@ export default function AssistantPage() {
   const [input, setInput] = useState('');
   const [listening, setListening] = useState(false);
   const [recognition, setRecognition] = useState<any>(null);
+  const [showLangPicker, setShowLangPicker] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   const handleSend = async (textOverride?: string) => {
@@ -189,18 +211,59 @@ export default function AssistantPage() {
     return null;
   };
 
-  const quickPrompts = [
-    'Hi',
-    'Tell me schemes available',
-    'Find schemes suitable for me',
-    'Show my application status',
-  ];
+  const quickPrompts = QUICK_PROMPTS[language as SupportedLang] ?? QUICK_PROMPTS.en;
 
   const pendingSchemeName = String(
     (pendingAction?.scheme as { nameEn?: string; name?: string } | undefined)?.nameEn
-      ?? (pendingAction?.scheme as { nameEn?: string; name?: string } | undefined)?.name
-      ?? 'selected scheme'
+    ?? (pendingAction?.scheme as { nameEn?: string; name?: string } | undefined)?.name
+    ?? 'selected scheme'
   );
+
+  // Build reasoning timeline from execution object
+  const reasoningSteps: Array<{ label: string; detail: string; icon: 'check' | 'clock' | 'db' | 'cpu' | 'warn' }> = [];
+  if (execution) {
+    if (execution.intent) {
+      reasoningSteps.push({ label: 'Intent', detail: String(execution.intent), icon: 'cpu' });
+    }
+    if (typeof execution.confidence === 'number') {
+      reasoningSteps.push({ label: 'Confidence', detail: `${Math.round((execution.confidence as number) * 100)}%`, icon: 'check' });
+    }
+    if ((execution as any).tool) {
+      reasoningSteps.push({ label: 'Tool', detail: String((execution as any).tool), icon: 'cpu' });
+    }
+    if ((execution as any).dataSource) {
+      reasoningSteps.push({ label: 'Data Source', detail: String((execution as any).dataSource), icon: 'db' });
+    }
+    if ((execution as any).latencyMs) {
+      reasoningSteps.push({ label: 'Latency', detail: `${(execution as any).latencyMs}ms`, icon: 'clock' });
+    }
+    if (Array.isArray(execution.steps) && (execution.steps as string[]).length > 0) {
+      reasoningSteps.push({ label: 'Steps', detail: (execution.steps as string[]).join(' → '), icon: 'check' });
+    }
+  }
+
+  const ServiceInfo = () => {
+    const trace = lastPayload?.serviceTrace as Record<string, any> | null;
+    if (!trace) return null;
+    return (
+      <div className="text-xs space-y-1 border-t border-surface-border pt-2 mt-2">
+        <div className="font-medium text-text-primary">Nova Pro Trace</div>
+        {trace.model ? <div className="text-text-muted">Model: {String(trace.model)}</div> : null}
+        {trace.inputTokens ? <div className="text-text-muted">In: {String(trace.inputTokens)} tokens</div> : null}
+        {trace.outputTokens ? <div className="text-text-muted">Out: {String(trace.outputTokens)} tokens</div> : null}
+        {trace.latencyMs ? <div className="text-text-muted">Latency: {String(trace.latencyMs)}ms</div> : null}
+        {trace.guardrailTriggered ? <div className="text-rose-600 font-medium">⚠ Guardrail triggered</div> : null}
+      </div>
+    );
+  };
+
+  const StepIcon = ({ kind }: { kind: string }) => {
+    if (kind === 'check') return <CheckCircle className="w-3.5 h-3.5 text-green-500 shrink-0" />;
+    if (kind === 'clock') return <Clock className="w-3.5 h-3.5 text-blue-500 shrink-0" />;
+    if (kind === 'db') return <Database className="w-3.5 h-3.5 text-violet-500 shrink-0" />;
+    if (kind === 'warn') return <AlertCircle className="w-3.5 h-3.5 text-amber-500 shrink-0" />;
+    return <Cpu className="w-3.5 h-3.5 text-cyan-500 shrink-0" />;
+  };
 
   return (
     <div className="grid lg:grid-cols-[1fr_320px] gap-6 h-[calc(100vh-160px)]">
@@ -210,7 +273,31 @@ export default function AssistantPage() {
             <h1 className="font-display text-lg font-semibold text-text-primary">Assistant</h1>
             <p className="text-xs text-text-muted">Continuous session chat</p>
           </div>
-          <div className="flex gap-2 text-xs">
+          <div className="flex gap-2 text-xs items-center">
+            <div className="relative">
+              <button
+                onClick={() => setShowLangPicker(!showLangPicker)}
+                className="flex items-center gap-1 px-2 py-1 rounded-full border border-surface-border bg-surface-bg text-text-secondary hover:bg-surface-elevated"
+                id="language-selector"
+                aria-label="Select language"
+              >
+                <Globe className="w-3.5 h-3.5" />
+                {LANG_LABELS[language as SupportedLang] ?? 'English'}
+              </button>
+              {showLangPicker ? (
+                <div className="absolute top-full right-0 mt-1 rounded-lg border border-surface-border bg-surface-card shadow-lg z-10 py-1 min-w-[120px]">
+                  {(Object.entries(LANG_LABELS) as [SupportedLang, string][]).map(([key, label]) => (
+                    <button
+                      key={key}
+                      onClick={() => { setLanguage(key as any); setShowLangPicker(false); }}
+                      className={`block w-full text-left px-3 py-1.5 text-xs hover:bg-surface-elevated ${language === key ? 'text-primary-600 font-semibold' : 'text-text-secondary'}`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
             <span className="px-2 py-1 rounded-full border border-surface-border bg-surface-bg">{responseMode}</span>
             {budgetMode !== 'normal' ? (
               <span className="px-2 py-1 rounded-full border border-rose-200 bg-rose-50 text-rose-700">Budget: {budgetMode}</span>
@@ -227,13 +314,22 @@ export default function AssistantPage() {
           {messages.map((m, i) => (
             <div key={`${m.timestamp}-${i}`} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div className={`max-w-[80%] rounded-lg px-3 py-2 text-sm ${m.role === 'user' ? 'bg-primary-500 text-white' : 'bg-surface-elevated text-text-primary border border-surface-border'}`}>
-                <div>{m.content}</div>
+                <div style={{ whiteSpace: 'pre-wrap' }}>{m.content}</div>
                 <div className={`mt-1 text-[10px] ${m.role === 'user' ? 'text-primary-100' : 'text-text-muted'}`}>
                   {new Date(m.timestamp).toLocaleTimeString()}
                 </div>
               </div>
             </div>
           ))}
+
+          {loading ? (
+            <div className="flex justify-start">
+              <div className="max-w-[80%] rounded-lg px-3 py-2 text-sm bg-surface-elevated text-text-muted border border-surface-border flex items-center gap-2">
+                <Loader className="w-4 h-4 animate-spin" />
+                <span>Thinking...</span>
+              </div>
+            </div>
+          ) : null}
 
           {cards.length > 0 ? (
             <div className="space-y-2">
@@ -293,7 +389,7 @@ export default function AssistantPage() {
               <button
                 key={p}
                 onClick={() => void handleSend(p)}
-                className="px-2.5 py-1 text-xs rounded-full border border-surface-border bg-surface-bg text-text-secondary"
+                className="px-2.5 py-1 text-xs rounded-full border border-surface-border bg-surface-bg text-text-secondary hover:bg-surface-elevated transition-colors"
               >
                 {p}
               </button>
@@ -303,9 +399,10 @@ export default function AssistantPage() {
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void handleSend(); } }}
               placeholder="Type your message..."
               rows={2}
-              className="flex-1 rounded-lg border border-surface-border bg-surface-bg px-3 py-2 text-sm text-text-primary"
+              className="flex-1 rounded-lg border border-surface-border bg-surface-bg px-3 py-2 text-sm text-text-primary resize-none"
             />
             <div className="flex flex-col gap-2">
               <Button variant="outline" onClick={onMic} aria-label="Toggle microphone">
@@ -320,13 +417,28 @@ export default function AssistantPage() {
       </section>
 
       <aside className="bg-surface-card border border-surface-border rounded-card shadow-card p-4 space-y-3 overflow-y-auto">
-        <h2 className="font-display text-base font-semibold text-text-primary">Agent Activity</h2>
-        <div className="text-sm text-text-secondary">
+        <h2 className="font-display text-base font-semibold text-text-primary">Agent Reasoning</h2>
+
+        {reasoningSteps.length > 0 ? (
+          <div className="space-y-2">
+            {reasoningSteps.map((step, i) => (
+              <div key={i} className="flex items-start gap-2 text-xs">
+                <StepIcon kind={step.icon} />
+                <div>
+                  <span className="font-medium text-text-primary">{step.label}:</span>{' '}
+                  <span className="text-text-secondary">{step.detail}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-xs text-text-muted">No reasoning steps yet. Send a message to start.</div>
+        )}
+
+        <div className="text-sm text-text-secondary space-y-1 border-t border-surface-border pt-2">
           <div><span className="font-medium">State:</span> {String(execution?.state ?? '-')}</div>
-          <div><span className="font-medium">Intent:</span> {String(execution?.intent ?? '-')}</div>
-          <div><span className="font-medium">Confidence:</span> {typeof execution?.confidence === 'number' ? `${Math.round((execution.confidence as number) * 100)}%` : '-'}</div>
-          <div><span className="font-medium">Steps:</span> {Array.isArray(execution?.steps) ? (execution.steps as string[]).join(' -> ') : '-'}</div>
         </div>
+
         <div>
           <h3 className="text-sm font-medium text-text-primary mb-1">Grounding Sources</h3>
           <div className="flex flex-wrap gap-1">
@@ -337,6 +449,8 @@ export default function AssistantPage() {
             ))}
           </div>
         </div>
+
+        <ServiceInfo />
       </aside>
     </div>
   );

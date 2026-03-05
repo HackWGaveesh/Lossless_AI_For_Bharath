@@ -10,7 +10,7 @@ import { deriveAssistantState, confirmIntentConfidence, type AssistantState } fr
 import { getRuntimeBudgetMode } from './runtime-config-service.js';
 import { callTool } from './tool-router.js';
 import { getLangLabel } from './language-service.js';
-import { detectWorkflowIntent, normalizeText, type WorkflowIntent } from './intent-detection.js';
+import { detectWorkflowIntent, normalizeText, detectLanguageHint, type WorkflowIntent } from './intent-detection.js';
 import type {
   ConversationRequest,
   ConversationResponse,
@@ -22,8 +22,8 @@ const bedrockRuntime = new BedrockRuntimeClient({ region: 'us-east-1' });
 const MODEL_ID = 'us.amazon.nova-pro-v1:0';
 const AGENT_TRACE_ENABLED = process.env.BEDROCK_AGENT_ENABLE_TRACE === 'true';
 const AGENT_TIMEOUT_MS = (() => {
-  const raw = Number(process.env.BEDROCK_AGENT_TIMEOUT_MS ?? 18000);
-  return Number.isFinite(raw) && raw > 0 ? raw : 18000;
+  const raw = Number(process.env.BEDROCK_AGENT_TIMEOUT_MS ?? 55000);
+  return Number.isFinite(raw) && raw > 0 ? raw : 55000;
 })();
 
 const ddb = DynamoDBDocumentClient.from(
@@ -284,6 +284,13 @@ async function maybeHandleStructuredWorkflow(args: {
     currentState = 'IDLE',
   } = args;
   const normalized = normalizeText(transcript);
+
+  // ── Auto-detect language from transcript script ─────────────────────────
+  const detectedLangHint = detectLanguageHint(transcript);
+  const effectiveLanguage = detectedLangHint
+    ? `${detectedLangHint}-IN`
+    : (args.forceLanguage || language || 'en-IN');
+
   let intent = detectWorkflowIntent(normalized);
   if (intent === 'none' && sessionPendingConfirmation?.type === 'apply_field_confirmation') {
     intent = 'apply';
@@ -302,8 +309,8 @@ async function maybeHandleStructuredWorkflow(args: {
   }
 
   if (intent === 'greeting') {
-    const langLabel = getLangLabel(language);
-    const greetings: Record<string, string> = {
+    const langLabel = getLangLabel(effectiveLanguage);
+    const greetingFallbacks: Record<string, string> = {
       Hindi: 'नमस्ते! मैं VaaniSetu हूं। मैं आपको योजनाएं, नौकरियां और आवेदन में मदद कर सकता हूं। आप क्या जानना चाहते हैं?',
       Tamil: 'வணக்கம்! நான் VaaniSetu. திட்டங்கள், வேலைகள் மற்றும் விண்ணப்பங்களில் உதவ முடியும். என்ன தேவை?',
       Telugu: 'నమస్కారం! నేను VaaniSetu. యోజనలు, ఉద్యోగాలు మరియు అప్లికేషన్లలో సహాయం చేయగలను. ఏమి కావాలి?',
@@ -311,12 +318,17 @@ async function maybeHandleStructuredWorkflow(args: {
       Marathi: 'नमस्कार! मी VaaniSetu. योजना, नोकरी आणि अर्जात मदत करू शकतो. काय हवं?',
       English: 'Hello! I\'m VaaniSetu. I can help with schemes, jobs, and applications. What would you like to know?',
     };
-    const responseText = greetings[langLabel] || greetings.English;
+    const fallbackText = greetingFallbacks[langLabel] || greetingFallbacks.English;
+    const orchestrated = await safeGenerateResponse(
+      { intent: 'general', language: effectiveLanguage, transcript, additionalContext: 'User is greeting you. Respond warmly and briefly list what you can help with.' },
+      fallbackText,
+    );
     return {
       actionCalled: null,
-      responseText,
+      responseText: orchestrated.responseText || fallbackText,
       actionResultType: 'greeting',
-      execution: { intent: 'greeting', confidence: 0.95, entities: {}, steps: ['greeting'] },
+      serviceTrace: orchestrated.serviceTrace,
+      execution: { intent: 'greeting', confidence: 0.95, entities: { detectedLanguage: detectedLangHint }, steps: ['greeting', 'novapro_orchestrator'] },
     };
   }
 
@@ -350,15 +362,23 @@ async function maybeHandleStructuredWorkflow(args: {
       { name: 'applicationId', value: appRef },
     ]);
     if (parsed?.code === 'DATA_UNAVAILABLE') {
+      const statusUnavailFallback = 'I cannot access live status data right now. Please try again shortly.';
+      const statusUnavailOrch = await safeGenerateResponse(
+        { intent: 'status', language: effectiveLanguage, transcript, additionalContext: 'Status data is temporarily unavailable. Ask user to try again shortly.' },
+        statusUnavailFallback,
+      );
       return {
         actionCalled: 'getApplicationStatus',
-        responseText: 'I cannot access live status data right now. Please try again shortly.',
+        responseText: statusUnavailOrch.responseText || statusUnavailFallback,
         actionResultType: 'data_unavailable',
+        serviceTrace: statusUnavailOrch.serviceTrace,
         execution: {
           intent,
           confidence: 0.98,
           entities: { applicationRef: appRef },
-          steps: ['getApplicationStatus', 'data_unavailable'],
+          steps: ['getApplicationStatus', 'data_unavailable', 'novapro_orchestrator'],
+          tool: 'getApplicationStatus',
+          dataSource: 'applications_table',
         },
       };
     }
@@ -372,22 +392,35 @@ async function maybeHandleStructuredWorkflow(args: {
           confidence: 0.98,
           entities: { applicationRef: appRef },
           steps: ['getApplicationStatus'],
+          tool: 'getApplicationStatus',
+          dataSource: 'applications_table',
         },
       };
     }
+    const statusFallback = `Application ${appRef} is ${parsed.status || 'under_review'}.${parsed.expectedDecision ? ` Expected decision: ${parsed.expectedDecision}.` : ''}`;
+    const statusOrch = await safeGenerateResponse(
+      {
+        intent: 'status',
+        language: effectiveLanguage,
+        transcript,
+        additionalContext: `Application reference: ${appRef}. Status: ${parsed.status || 'under_review'}.${parsed.expectedDecision ? ` Expected decision: ${parsed.expectedDecision}.` : ''} ${parsed.message || ''}`,
+      },
+      statusFallback,
+    );
     return {
       actionCalled: 'getApplicationStatus',
-      responseText: `${parsed.message || `Application ${appRef} is ${parsed.status || 'under_review'}.`}${
-        parsed.expectedDecision ? ` Expected decision: ${parsed.expectedDecision}.` : ''
-      }`,
+      responseText: statusOrch.responseText || statusFallback,
       cards: [{ type: 'application_status', applicationRef: appRef, status: parsed.status || 'under_review' }],
       grounding: { sources: ['applications_table'] },
+      serviceTrace: statusOrch.serviceTrace,
       actionResultType: 'status',
       execution: {
         intent,
         confidence: 0.98,
         entities: { applicationRef: appRef },
-        steps: ['getApplicationStatus'],
+        steps: ['getApplicationStatus', 'novapro_orchestrator'],
+        tool: 'getApplicationStatus',
+        dataSource: 'applications_table',
       },
     };
   }
@@ -687,11 +720,11 @@ async function maybeHandleStructuredWorkflow(args: {
       responseText: profileUpdatedText,
       cards: parsed?.success
         ? [
-            {
-              type: 'profile_updated',
-              updatedFields: updatedFieldsArray,
-            },
-          ]
+          {
+            type: 'profile_updated',
+            updatedFields: updatedFieldsArray,
+          },
+        ]
         : [],
       grounding: { sources: ['users_table'] },
       actionResultType: parsed?.success ? 'profile_updated' : 'profile_error',
@@ -752,7 +785,7 @@ async function maybeHandleStructuredWorkflow(args: {
     const orchestrated = await safeGenerateResponse(
       {
         intent: 'jobs',
-        language,
+        language: effectiveLanguage,
         transcript,
         jobs: jobs.map((j: any) => ({
           title: j.title,
@@ -791,7 +824,7 @@ async function maybeHandleStructuredWorkflow(args: {
       runAction,
       profile,
       transcript,
-      language,
+      language: effectiveLanguage,
       intent,
     });
   }
@@ -800,26 +833,50 @@ async function maybeHandleStructuredWorkflow(args: {
     const fn = intent === 'scheme_detail' ? 'getSchemeDetails' : 'resolveScheme';
     const parsed = await runAction(fn, [{ name: 'query', value: transcript }]);
     if (parsed?.code === 'DATA_UNAVAILABLE') {
+      const schemeUnavailFallback = 'I cannot access live scheme data right now. Please try again shortly.';
+      const schemeUnavailOrch = await safeGenerateResponse(
+        { intent: 'scheme_detail', language: effectiveLanguage, transcript, additionalContext: 'Scheme data is temporarily unavailable.' },
+        schemeUnavailFallback,
+      );
       return {
         actionCalled: fn,
-        responseText: 'I cannot access live scheme data right now. Please try again shortly.',
+        responseText: schemeUnavailOrch.responseText || schemeUnavailFallback,
         actionResultType: 'data_unavailable',
+        serviceTrace: schemeUnavailOrch.serviceTrace,
         execution: {
           intent,
           confidence: 0.85,
           entities: { query: transcript },
-          steps: [fn, 'data_unavailable'],
+          steps: [fn, 'data_unavailable', 'novapro_orchestrator'],
+          tool: fn,
+          dataSource: 'schemes_table',
         },
       };
     }
     if (parsed?.success && parsed?.scheme) {
       const s = parsed.scheme;
-      const benefit = s.benefitRs ? ` Benefit: Rs ${Number(s.benefitRs).toLocaleString('en-IN')}.` : '';
+      const schemeFallback = `${s.nameEn || s.name || s.code || 'Scheme'}${s.nameHi ? ` (${s.nameHi})` : ''}. ${s.benefitRs ? `Benefit: Rs ${Number(s.benefitRs).toLocaleString('en-IN')}.` : ''} ${s.description || ''}`.trim();
+      const schemeOrch = await safeGenerateResponse(
+        {
+          intent: 'scheme_detail',
+          language: effectiveLanguage,
+          transcript,
+          schemes: [{
+            id: s.id || s.code,
+            code: s.code,
+            name: s.nameEn || s.name,
+            nameHi: s.nameHi,
+            description: s.description || '',
+            benefitRs: Number(s.benefitRs || 0),
+            category: s.category || '',
+          }],
+          userProfile: profile,
+        },
+        schemeFallback,
+      );
       return {
         actionCalled: fn,
-        responseText: `${s.nameEn || s.name || s.code || 'Scheme'}${s.nameHi ? ` (${s.nameHi})` : ''}.${benefit} ${
-          s.description || ''
-        }`.trim(),
+        responseText: schemeOrch.responseText || schemeFallback,
         cards: [
           {
             type: 'scheme_card',
@@ -832,12 +889,15 @@ async function maybeHandleStructuredWorkflow(args: {
           },
         ],
         grounding: { sources: ['schemes_table'] },
+        serviceTrace: schemeOrch.serviceTrace,
         actionResultType: intent === 'scheme_detail' ? 'scheme_detail' : 'scheme_lookup',
         execution: {
           intent,
           confidence: 0.86,
           entities: { query: transcript },
-          steps: [fn],
+          steps: [fn, 'novapro_orchestrator'],
+          tool: fn,
+          dataSource: 'schemes_table',
         },
       };
     }
@@ -1347,11 +1407,9 @@ async function maybeHandleStructuredWorkflow(args: {
     }));
     return {
       actionCalled: 'prepareApplication',
-      responseText: `You are applying for ${
-        parsed.scheme.nameEn || parsed.scheme.name
-      } (benefit up to Rs ${Number(parsed.scheme.benefitRs || 0).toLocaleString('en-IN')}).${missing} Say: confirm application for ${
-        parsed.scheme.nameEn || parsed.scheme.name
-      }.`,
+      responseText: `You are applying for ${parsed.scheme.nameEn || parsed.scheme.name
+        } (benefit up to Rs ${Number(parsed.scheme.benefitRs || 0).toLocaleString('en-IN')}).${missing} Say: confirm application for ${parsed.scheme.nameEn || parsed.scheme.name
+        }.`,
       pendingConfirmation: {
         type: 'application_confirm',
         confirmationToken: parsed.confirmationToken || null,
@@ -1582,8 +1640,7 @@ async function buildSchemesEligibilityResponse(args: {
     matchReasons: Array.isArray(s.matchReasons) ? s.matchReasons : [],
   }));
   const lines = schemes.map((s: any, i: number) =>
-    `${i + 1}. ${s.name}${s.benefitRs ? ` - Rs ${Number(s.benefitRs).toLocaleString('en-IN')}` : ''} (${
-      s.matchPercent || 0
+    `${i + 1}. ${s.name}${s.benefitRs ? ` - Rs ${Number(s.benefitRs).toLocaleString('en-IN')}` : ''} (${s.matchPercent || 0
     }% match)`,
   );
   const fallback = `Top schemes for you:\n${lines.join('\n')}\nSay: apply for <scheme name> to continue.`;
@@ -2455,15 +2512,21 @@ async function directModelCall(
   sessionContext: { role: string; content: string }[],
 ): Promise<string> {
   const langLabel = getLangLabel(language);
-  const systemPrompt = `You are VaaniSetu, a helpful assistant for rural citizens.
-Always respond in ${langLabel}.
+  const systemPrompt = `You are VaaniSetu, a warm and helpful assistant for rural Indian citizens.
+Always respond in ${langLabel} using its native script.
 Keep answers concise (2-4 sentences), warm, and practical.
 
+Capabilities you can highlight:
+- Government welfare schemes discovery and eligibility checking
+- Application submission and status tracking
+- Job matching based on profile
+- Profile updates and document management
+
 Reliability rules:
-- Never invent scheme names, benefit amounts, eligibility rules, job data, or application status.
-- If the user asks for factual scheme/job/status/application data, ask them to use the workflow path and do not provide guessed facts.
-- Do not claim profile updates, submissions, or status changes from this mode.
-- This mode is only for greetings, generic guidance, and conversational help.`;
+- If the user asks for specific scheme names, amounts, or status, guide them to use the assistant commands (e.g. "tell me schemes available", "check my application status").
+- You can offer general guidance, explain how to use the service, and have friendly conversation.
+- For greetings and general help, be warm and conversational.
+- AWS services powering VaaniSetu: Amazon Bedrock Nova Pro, DynamoDB, Lambda, Aurora.`;
 
   const messages = [
     ...sessionContext.slice(-6).map((m) => ({

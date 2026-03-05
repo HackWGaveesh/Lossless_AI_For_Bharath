@@ -168,36 +168,69 @@ function makeConfirmationToken(userId: string, schemeId: string): string {
 }
 
 async function loadSchemes(): Promise<SchemeLite[]> {
+    const AURORA_TIMEOUT_MS = 10000;
     try {
-        const result = await rds.send(new ExecuteStatementCommand({
-            resourceArn: process.env.DB_CLUSTER_ARN!,
-            secretArn: process.env.DB_SECRET_ARN!,
-            database: process.env.DB_NAME || 'vaanisetu',
-            sql: `SELECT scheme_id, scheme_code, name_en, name_hi, description, benefit_amount_max, eligibility_criteria, category, documents_required, application_url
-                  FROM schemes WHERE is_active = true ORDER BY benefit_amount_max DESC NULLS LAST LIMIT 500`,
-        }));
-        return (result.records ?? []).map((r) => {
-            const docsRaw = safeJson(r[8]?.stringValue);
-            return ({
-            id: r[0]?.stringValue ?? '',
-            code: r[1]?.stringValue ?? r[0]?.stringValue ?? '',
-            nameEn: r[2]?.stringValue ?? '',
-            nameHi: r[3]?.stringValue ?? '',
-            description: r[4]?.stringValue ?? '',
-            benefitRs: parseNum(r[5]),
-            criteria: safeJson(r[6]?.stringValue),
-            category: r[7]?.stringValue ?? '',
-            documentsRequired: Array.isArray(docsRaw) ? docsRaw : [],
-            applicationUrl: r[9]?.stringValue ?? '',
-        });
-        });
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), AURORA_TIMEOUT_MS);
+        try {
+            const result = await rds.send(new ExecuteStatementCommand({
+                resourceArn: process.env.DB_CLUSTER_ARN!,
+                secretArn: process.env.DB_SECRET_ARN!,
+                database: process.env.DB_NAME || 'vaanisetu',
+                sql: `SELECT scheme_id, scheme_code, name_en, name_hi, description, benefit_amount_max, eligibility_criteria, category, documents_required, application_url
+                      FROM schemes WHERE is_active = true ORDER BY benefit_amount_max DESC NULLS LAST LIMIT 500`,
+            }), { abortSignal: ac.signal });
+            clearTimeout(timer);
+            return (result.records ?? []).map((r) => {
+                const docsRaw = safeJson(r[8]?.stringValue);
+                return ({
+                    id: r[0]?.stringValue ?? '',
+                    code: r[1]?.stringValue ?? r[0]?.stringValue ?? '',
+                    nameEn: r[2]?.stringValue ?? '',
+                    nameHi: r[3]?.stringValue ?? '',
+                    description: r[4]?.stringValue ?? '',
+                    benefitRs: parseNum(r[5]),
+                    criteria: safeJson(r[6]?.stringValue),
+                    category: r[7]?.stringValue ?? '',
+                    documentsRequired: Array.isArray(docsRaw) ? docsRaw : [],
+                    applicationUrl: r[9]?.stringValue ?? '',
+                });
+            });
+        } catch (auroraErr: any) {
+            clearTimeout(timer);
+            const isTimeout = auroraErr?.name === 'AbortError' || (auroraErr?.message || '').includes('abort');
+            logger.warn('Aurora query failed', { isTimeout, error: auroraErr?.message || String(auroraErr) });
+            throw auroraErr;
+        }
     } catch {
         if (!ALLOW_LOCAL_DATA_FALLBACK) {
             throw new Error('DATA_UNAVAILABLE: schemes datasource is currently unavailable');
         }
+        logger.info('Falling back to local JSON for schemes');
         const fs = await import('fs/promises');
         const path = await import('path');
-        const raw = await fs.readFile(path.resolve(process.cwd(), '../data/schemes/central-schemes.json'), 'utf-8');
+        const url = await import('url');
+        // Resolve relative to this file's location, not process.cwd() (which is / in Lambda)
+        const thisDir = typeof __dirname !== 'undefined'
+            ? __dirname
+            : path.dirname(url.fileURLToPath(import.meta.url));
+        const candidates = [
+            path.resolve(thisDir, '../../../../data/schemes/central-schemes.json'),
+            path.resolve(thisDir, '../../../data/schemes/central-schemes.json'),
+            path.resolve(process.cwd(), 'data/schemes/central-schemes.json'),
+            path.resolve(process.cwd(), '../data/schemes/central-schemes.json'),
+        ];
+        let raw = '';
+        for (const candidate of candidates) {
+            try {
+                raw = await fs.readFile(candidate, 'utf-8');
+                logger.info('Loaded local schemes from', { path: candidate });
+                break;
+            } catch { /* try next */ }
+        }
+        if (!raw) {
+            throw new Error('DATA_UNAVAILABLE: local fallback file not found at any candidate path');
+        }
         return JSON.parse(raw).map((s: any) => ({
             id: s.scheme_id,
             code: s.scheme_code ?? s.scheme_id,
@@ -261,421 +294,421 @@ export async function executeAgentAction(event: any): Promise<Record<string, any
     const effectiveUserId = String(getParam('userId') || event?.userId || event?.sessionAttributes?.userId || '').trim();
     try {
         switch (funcName) {
-        case 'resolveScheme':
-        case 'getSchemeDetails': {
-            const schemes = await loadSchemes();
-            const query = `${getParam('query')} ${getParam('schemeName')} ${getParam('schemeId')}`.trim();
-            if (!query) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please provide a scheme name.' });
-            const resolved = resolveSchemesTop3(schemes, query);
-            if (resolved.code === 'OK' && resolved.best) {
-                return withToolMeta({ success: true, code: 'OK', scheme: toPublicScheme(resolved.best) });
-            }
-            if (resolved.code === 'AMBIGUOUS_TOP3' && resolved.top3) {
-                return withToolMeta({ success: false, code: 'AMBIGUOUS_TOP3', message: 'I found multiple matching schemes. Please pick one.', options: resolved.top3.map(toPublicScheme) });
-            }
-            return withToolMeta({ success: false, code: 'NOT_FOUND', message: 'No matching scheme found.', options: schemes.slice(0, 3).map(toPublicScheme) });
-        }
-
-        case 'prepareApplication': {
-            if (!effectiveUserId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please login and try again.' });
-            const schemes = await loadSchemes();
-            const query = `${getParam('query')} ${getParam('schemeName')} ${getParam('schemeId')}`.trim();
-            const resolved = resolveSchemesTop3(schemes, query);
-            if (resolved.code === 'AMBIGUOUS_TOP3' && resolved.top3) {
-                return withToolMeta({ success: false, code: 'AMBIGUOUS_TOP3', message: 'I found multiple matching schemes. Please pick one.', options: resolved.top3.map(toPublicScheme) });
-            }
-            if (resolved.code !== 'OK' || !resolved.best) {
-                return withToolMeta({ success: false, code: 'NOT_FOUND', message: 'I could not identify the scheme.', options: schemes.slice(0, 3).map(toPublicScheme) });
-            }
-
-            const { profile, documentSummary, providedDocTypes } = await getProfileAndDocumentSummary(effectiveUserId);
-            const required = (resolved.best.documentsRequired || []).map((d) => normalizeRequiredDoc(d));
-            const missingDocuments = required.filter((req) => !providedDocTypes.some((p) => docsMatch(req, p)));
-            const confirmationToken = makeConfirmationToken(effectiveUserId, resolved.best.id);
-
-            return withToolMeta({
-                success: true,
-                code: 'NEEDS_CONFIRMATION',
-                message: `Please confirm application for ${resolved.best.nameEn}.`,
-                scheme: toPublicScheme(resolved.best),
-                userProfile: profile,
-                documents: documentSummary,
-                missingDocuments,
-                confirmationToken,
-                expiresInSeconds: Math.max(120, CONFIRM_TTL_SEC),
-            });
-        }
-
-        case 'confirmApplication': {
-            if (!effectiveUserId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please login and try again.' });
-            const confirm = normalizeText(getParam('confirm') || 'true');
-            if (!['true', 'yes', '1', 'confirm'].includes(confirm)) {
-                return withToolMeta({ success: false, code: 'NEEDS_CONFIRMATION', message: 'Please confirm to continue.' });
-            }
-            const payload = verifyToken(getParam('confirmationToken'));
-            if (!payload || payload.u !== effectiveUserId) {
-                return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Confirmation expired. Please start again.' });
-            }
-            return withToolMeta({ success: true, code: 'OK', confirmationToken: getParam('confirmationToken'), message: 'Confirmation accepted.' });
-        }
-
-        case 'submitApplication': {
-            if (!effectiveUserId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please login and try again.' });
-            const confirm = normalizeText(getParam('confirm') || 'true');
-            if (!['true', 'yes', '1', 'confirm'].includes(confirm)) {
-                return withToolMeta({ success: false, code: 'NEEDS_CONFIRMATION', message: 'Please confirm before submit.' });
-            }
-            const idempotencyKey = getParam('idempotencyKey');
-            if (idempotencyKey) {
-                const q = await dynamo.send(new QueryCommand({
-                    TableName: APPLICATIONS_TABLE,
-                    KeyConditionExpression: 'user_id = :uid',
-                    ExpressionAttributeValues: { ':uid': effectiveUserId },
-                    ScanIndexForward: false,
-                    Limit: 50,
-                })).catch(() => ({ Items: [] } as any));
-                const existing = (q.Items ?? []).find((i: any) => String(i.idempotency_key || '') === idempotencyKey);
-                if (existing) {
-                    return withToolMeta({ success: true, code: 'OK', idempotent: true, applicationId: existing.application_id, status: existing.status, schemeId: existing.scheme_id, schemeName: existing.scheme_name, schemeCode: existing.scheme_code, message: `Application already submitted. Reference: ${existing.application_id}.` });
+            case 'resolveScheme':
+            case 'getSchemeDetails': {
+                const schemes = await loadSchemes();
+                const query = `${getParam('query')} ${getParam('schemeName')} ${getParam('schemeId')}`.trim();
+                if (!query) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please provide a scheme name.' });
+                const resolved = resolveSchemesTop3(schemes, query);
+                if (resolved.code === 'OK' && resolved.best) {
+                    return withToolMeta({ success: true, code: 'OK', scheme: toPublicScheme(resolved.best) });
                 }
+                if (resolved.code === 'AMBIGUOUS_TOP3' && resolved.top3) {
+                    return withToolMeta({ success: false, code: 'AMBIGUOUS_TOP3', message: 'I found multiple matching schemes. Please pick one.', options: resolved.top3.map(toPublicScheme) });
+                }
+                return withToolMeta({ success: false, code: 'NOT_FOUND', message: 'No matching scheme found.', options: schemes.slice(0, 3).map(toPublicScheme) });
             }
 
-            const schemes = await loadSchemes();
-            let selected = null as SchemeLite | null;
-            const tokenPayload = verifyToken(getParam('confirmationToken'));
-            if (tokenPayload && tokenPayload.u === effectiveUserId) {
-                selected = schemes.find((s) => s.id === tokenPayload.s) || null;
-            }
-            if (!selected) {
+            case 'prepareApplication': {
+                if (!effectiveUserId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please login and try again.' });
+                const schemes = await loadSchemes();
                 const query = `${getParam('query')} ${getParam('schemeName')} ${getParam('schemeId')}`.trim();
                 const resolved = resolveSchemesTop3(schemes, query);
                 if (resolved.code === 'AMBIGUOUS_TOP3' && resolved.top3) {
                     return withToolMeta({ success: false, code: 'AMBIGUOUS_TOP3', message: 'I found multiple matching schemes. Please pick one.', options: resolved.top3.map(toPublicScheme) });
                 }
-                if (resolved.code !== 'OK' || !resolved.best) return withToolMeta({ success: false, code: 'NOT_FOUND', message: 'Could not identify the scheme to submit.' });
-                selected = resolved.best;
+                if (resolved.code !== 'OK' || !resolved.best) {
+                    return withToolMeta({ success: false, code: 'NOT_FOUND', message: 'I could not identify the scheme.', options: schemes.slice(0, 3).map(toPublicScheme) });
+                }
+
+                const { profile, documentSummary, providedDocTypes } = await getProfileAndDocumentSummary(effectiveUserId);
+                const required = (resolved.best.documentsRequired || []).map((d) => normalizeRequiredDoc(d));
+                const missingDocuments = required.filter((req) => !providedDocTypes.some((p) => docsMatch(req, p)));
+                const confirmationToken = makeConfirmationToken(effectiveUserId, resolved.best.id);
+
+                return withToolMeta({
+                    success: true,
+                    code: 'NEEDS_CONFIRMATION',
+                    message: `Please confirm application for ${resolved.best.nameEn}.`,
+                    scheme: toPublicScheme(resolved.best),
+                    userProfile: profile,
+                    documents: documentSummary,
+                    missingDocuments,
+                    confirmationToken,
+                    expiresInSeconds: Math.max(120, CONFIRM_TTL_SEC),
+                });
             }
 
-            const { profile, documentSummary, providedDocTypes } = await getProfileAndDocumentSummary(effectiveUserId);
-            const required = (selected.documentsRequired || []).map((d) => normalizeRequiredDoc(d));
-            const missingDocuments = required.filter((req) => !providedDocTypes.some((p) => docsMatch(req, p)));
+            case 'confirmApplication': {
+                if (!effectiveUserId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please login and try again.' });
+                const confirm = normalizeText(getParam('confirm') || 'true');
+                if (!['true', 'yes', '1', 'confirm'].includes(confirm)) {
+                    return withToolMeta({ success: false, code: 'NEEDS_CONFIRMATION', message: 'Please confirm to continue.' });
+                }
+                const payload = verifyToken(getParam('confirmationToken'));
+                if (!payload || payload.u !== effectiveUserId) {
+                    return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Confirmation expired. Please start again.' });
+                }
+                return withToolMeta({ success: true, code: 'OK', confirmationToken: getParam('confirmationToken'), message: 'Confirmation accepted.' });
+            }
 
-            const applicationId = toAppId();
-            const now = new Date().toISOString();
-            await dynamo.send(new PutCommand({
-                TableName: APPLICATIONS_TABLE,
-                Item: {
-                    user_id: effectiveUserId,
-                    application_id: applicationId,
-                    scheme_id: selected.id,
-                    scheme_name: selected.nameEn,
-                    scheme_code: selected.code,
-                    status: 'submitted',
-                    created_at: now,
-                    updated_at: now,
-                    source: 'agent_workflow',
-                    idempotency_key: idempotencyKey || null,
-                    missing_documents: missingDocuments,
-                    profile_snapshot: profile,
-                    documents_snapshot: documentSummary,
-                },
-            }));
-            return withToolMeta({ success: true, code: 'OK', applicationId, schemeId: selected.id, schemeCode: selected.code, schemeName: selected.nameEn, status: 'submitted', missingDocuments, message: `Application submitted for ${selected.nameEn}. Reference: ${applicationId}. Keep this number for tracking.` });
-        }
+            case 'submitApplication': {
+                if (!effectiveUserId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please login and try again.' });
+                const confirm = normalizeText(getParam('confirm') || 'true');
+                if (!['true', 'yes', '1', 'confirm'].includes(confirm)) {
+                    return withToolMeta({ success: false, code: 'NEEDS_CONFIRMATION', message: 'Please confirm before submit.' });
+                }
+                const idempotencyKey = getParam('idempotencyKey');
+                if (idempotencyKey) {
+                    const q = await dynamo.send(new QueryCommand({
+                        TableName: APPLICATIONS_TABLE,
+                        KeyConditionExpression: 'user_id = :uid',
+                        ExpressionAttributeValues: { ':uid': effectiveUserId },
+                        ScanIndexForward: false,
+                        Limit: 50,
+                    })).catch(() => ({ Items: [] } as any));
+                    const existing = (q.Items ?? []).find((i: any) => String(i.idempotency_key || '') === idempotencyKey);
+                    if (existing) {
+                        return withToolMeta({ success: true, code: 'OK', idempotent: true, applicationId: existing.application_id, status: existing.status, schemeId: existing.scheme_id, schemeName: existing.scheme_name, schemeCode: existing.scheme_code, message: `Application already submitted. Reference: ${existing.application_id}.` });
+                    }
+                }
 
-        case 'createApplication': {
-            const confirm = normalizeText(getParam('confirm') || '');
-            if (!['true', 'yes', '1', 'confirm'].includes(confirm)) {
+                const schemes = await loadSchemes();
+                let selected = null as SchemeLite | null;
+                const tokenPayload = verifyToken(getParam('confirmationToken'));
+                if (tokenPayload && tokenPayload.u === effectiveUserId) {
+                    selected = schemes.find((s) => s.id === tokenPayload.s) || null;
+                }
+                if (!selected) {
+                    const query = `${getParam('query')} ${getParam('schemeName')} ${getParam('schemeId')}`.trim();
+                    const resolved = resolveSchemesTop3(schemes, query);
+                    if (resolved.code === 'AMBIGUOUS_TOP3' && resolved.top3) {
+                        return withToolMeta({ success: false, code: 'AMBIGUOUS_TOP3', message: 'I found multiple matching schemes. Please pick one.', options: resolved.top3.map(toPublicScheme) });
+                    }
+                    if (resolved.code !== 'OK' || !resolved.best) return withToolMeta({ success: false, code: 'NOT_FOUND', message: 'Could not identify the scheme to submit.' });
+                    selected = resolved.best;
+                }
+
+                const { profile, documentSummary, providedDocTypes } = await getProfileAndDocumentSummary(effectiveUserId);
+                const required = (selected.documentsRequired || []).map((d) => normalizeRequiredDoc(d));
+                const missingDocuments = required.filter((req) => !providedDocTypes.some((p) => docsMatch(req, p)));
+
+                const applicationId = toAppId();
+                const now = new Date().toISOString();
+                await dynamo.send(new PutCommand({
+                    TableName: APPLICATIONS_TABLE,
+                    Item: {
+                        user_id: effectiveUserId,
+                        application_id: applicationId,
+                        scheme_id: selected.id,
+                        scheme_name: selected.nameEn,
+                        scheme_code: selected.code,
+                        status: 'submitted',
+                        created_at: now,
+                        updated_at: now,
+                        source: 'agent_workflow',
+                        idempotency_key: idempotencyKey || null,
+                        missing_documents: missingDocuments,
+                        profile_snapshot: profile,
+                        documents_snapshot: documentSummary,
+                    },
+                }));
+                return withToolMeta({ success: true, code: 'OK', applicationId, schemeId: selected.id, schemeCode: selected.code, schemeName: selected.nameEn, status: 'submitted', missingDocuments, message: `Application submitted for ${selected.nameEn}. Reference: ${applicationId}. Keep this number for tracking.` });
+            }
+
+            case 'createApplication': {
+                const confirm = normalizeText(getParam('confirm') || '');
+                if (!['true', 'yes', '1', 'confirm'].includes(confirm)) {
+                    return executeAgentAction({
+                        ...event,
+                        function: 'prepareApplication',
+                        parameters: [
+                            { name: 'userId', value: effectiveUserId },
+                            { name: 'query', value: getParam('query') },
+                            { name: 'schemeName', value: getParam('schemeName') },
+                            { name: 'schemeId', value: getParam('schemeId') },
+                        ],
+                    });
+                }
                 return executeAgentAction({
                     ...event,
-                    function: 'prepareApplication',
+                    function: 'submitApplication',
                     parameters: [
                         { name: 'userId', value: effectiveUserId },
+                        { name: 'confirm', value: 'true' },
                         { name: 'query', value: getParam('query') },
                         { name: 'schemeName', value: getParam('schemeName') },
                         { name: 'schemeId', value: getParam('schemeId') },
+                        { name: 'confirmationToken', value: getParam('confirmationToken') },
+                        { name: 'idempotencyKey', value: getParam('idempotencyKey') },
                     ],
                 });
             }
-            return executeAgentAction({
-                ...event,
-                function: 'submitApplication',
-                parameters: [
-                    { name: 'userId', value: effectiveUserId },
-                    { name: 'confirm', value: 'true' },
-                    { name: 'query', value: getParam('query') },
-                    { name: 'schemeName', value: getParam('schemeName') },
-                    { name: 'schemeId', value: getParam('schemeId') },
-                    { name: 'confirmationToken', value: getParam('confirmationToken') },
-                    { name: 'idempotencyKey', value: getParam('idempotencyKey') },
-                ],
-            });
-        }
 
-        case 'updateUserProfile': {
-            if (!effectiveUserId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please login and try again.' });
-            const patch: Record<string, any> = {};
-            const directFields = ['name', 'fullName', 'phone', 'state', 'district', 'gender', 'occupation', 'email', 'pincode', 'address', 'casteCategory', 'preferredLanguage'];
-            for (const field of directFields) {
-                const v = getParam(field);
-                if (v) patch[field] = v;
-            }
-            if (getParam('age')) patch.age = Number(getParam('age'));
-            if (getParam('annualIncome')) patch.annualIncome = Number(getParam('annualIncome'));
-            if (getParam('bplCardholder')) patch.bplCardholder = ['true', '1', 'yes'].includes(normalizeText(getParam('bplCardholder')));
-            if (!Object.keys(patch).length) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'No profile fields provided.' });
-            if (patch.annualIncome != null) patch.annual_income = patch.annualIncome;
-            if (patch.casteCategory != null) patch.caste_category = patch.casteCategory;
-            if (patch.preferredLanguage != null) patch.preferred_language = patch.preferredLanguage;
-            const current = await dynamo.send(new GetCommand({ TableName: USERS_TABLE, Key: { user_id: effectiveUserId } })).catch(() => ({ Item: {} } as any));
-            const merged = { ...(current.Item ?? {}), ...patch, user_id: effectiveUserId, updated_at: new Date().toISOString() };
-            await dynamo.send(new PutCommand({ TableName: USERS_TABLE, Item: merged }));
-            return withToolMeta({ success: true, code: 'OK', message: 'Profile updated successfully.', updatedFields: Object.keys(patch), profile: merged });
-        }
-
-        case 'setPreferredLanguage': {
-            const langRaw = normalizeText(getParam('language') || getParam('preferredLanguage'));
-            const map: Record<string, string> = { english: 'en', en: 'en', hindi: 'hi', hi: 'hi', tamil: 'ta', ta: 'ta', telugu: 'te', te: 'te', marathi: 'mr', mr: 'mr', kannada: 'kn', kn: 'kn' };
-            const language = map[langRaw] || langRaw;
-            if (!['en', 'hi', 'ta', 'te', 'mr', 'kn'].includes(language)) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Unsupported language.' });
-            return executeAgentAction({
-                ...event,
-                function: 'updateUserProfile',
-                parameters: [
-                    { name: 'userId', value: effectiveUserId },
-                    { name: 'preferredLanguage', value: language },
-                ],
-            }).then((r) => withToolMeta({ ...r, preferredLanguage: language, message: `Default language updated to ${language}.` }));
-        }
-
-        case 'updateUserProfilePatch': {
-            return executeAgentAction({
-                ...event,
-                function: 'updateUserProfile',
-                parameters,
-            });
-        }
-
-        case 'collectProfileGaps': {
-            if (!effectiveUserId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please login and try again.' });
-            const flowType = normalizeText(getParam('flowType') || 'apply');
-            const userRes = await dynamo.send(new GetCommand({ TableName: USERS_TABLE, Key: { user_id: effectiveUserId } })).catch(() => ({ Item: {} } as any));
-            const profile = (userRes.Item ?? {}) as Record<string, any>;
-            const commonRequired = ['name', 'phone', 'state', 'district'];
-            const applyOnly = ['address'];
-            // Scheme discovery should not block on name/phone. Focus on eligibility-driving fields.
-            const schemeRequired = ['age', 'annual_income', 'gender', 'occupation', 'caste_category', 'state'];
-            const required = flowType === 'schemes'
-                ? schemeRequired
-                : flowType === 'jobs'
-                    ? ['state', 'occupation']
-                    : [...commonRequired, ...applyOnly];
-            const missing = required.filter((f) => {
-                const val = profile[f] ?? profile[f.replace('_', '')] ?? profile[f === 'name' ? 'fullName' : f];
-                return val == null || String(val).trim() === '';
-            });
-            return withToolMeta({
-                success: true,
-                code: 'OK',
-                flowType,
-                requiredFields: required,
-                missingFields: missing,
-                profile,
-                message: missing.length ? `Missing required profile fields: ${missing.join(', ')}` : 'Profile is complete for this flow.',
-            });
-        }
-
-        case 'confirmApplicationField': {
-            const field = String(getParam('field') || '').trim();
-            const value = String(getParam('value') || '').trim();
-            if (!field || !value) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'field and value are required.' });
-            return executeAgentAction({
-                ...event,
-                function: 'updateUserProfile',
-                parameters: [
-                    { name: 'userId', value: effectiveUserId },
-                    { name: field, value },
-                ],
-            });
-        }
-
-        case 'getRequiredDocuments': {
-            if (!effectiveUserId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please login and try again.' });
-            const schemes = await loadSchemes();
-            const query = `${getParam('query')} ${getParam('schemeName')} ${getParam('schemeId')}`.trim();
-            const resolved = resolveSchemesTop3(schemes, query);
-            if (resolved.code !== 'OK' || !resolved.best) {
-                return withToolMeta({ success: false, code: resolved.code, message: 'Unable to identify scheme for required documents.' });
-            }
-            const { providedDocTypes } = await getProfileAndDocumentSummary(effectiveUserId);
-            const required = (resolved.best.documentsRequired || []).map((d) => normalizeRequiredDoc(d));
-            const missing = required.filter((req) => !providedDocTypes.some((p) => docsMatch(req, p)));
-            return withToolMeta({
-                success: true,
-                code: 'OK',
-                schemeId: resolved.best.id,
-                requiredDocuments: required,
-                missingDocuments: missing,
-                message: missing.length ? `Missing documents: ${missing.join(', ')}` : 'All required documents are available.',
-            });
-        }
-
-        case 'requestDocumentUploadSlot': {
-            const documentType = normalizeRequiredDoc(getParam('documentType'));
-            if (!documentType) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'documentType is required.' });
-            return withToolMeta({
-                success: true,
-                code: 'OK',
-                documentType,
-                uploadApiPath: '/documents/upload',
-                message: `Upload slot ready for ${documentType}.`,
-            });
-        }
-
-        case 'verifyDocument': {
-            if (!effectiveUserId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please login and try again.' });
-            const documentId = getParam('documentId');
-            if (!documentId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'documentId is required.' });
-            const res = await dynamo.send(new GetCommand({ TableName: DOCUMENTS_TABLE, Key: { user_id: effectiveUserId, document_id: documentId } })).catch(() => ({ Item: undefined } as any));
-            if (!res.Item) return withToolMeta({ success: false, code: 'NOT_FOUND', message: 'Document not found.' });
-            const item: any = res.Item;
-            return withToolMeta({
-                success: true,
-                code: 'OK',
-                documentId,
-                status: item.status || 'processing',
-                structuredData: item.structured_data || {},
-                message: `Document ${documentId} status: ${item.status || 'processing'}.`,
-            });
-        }
-
-        case 'getSchemesByProfile': {
-            const age = parseInt(getParam('age') || '0', 10);
-            const annualIncome = parseInt(getParam('annualIncome') || '0', 10);
-            const gender = getParam('gender');
-            const state = getParam('state');
-            const occupation = getParam('occupation');
-            const casteCategory = getParam('casteCategory');
-            const bplCardholder = ['true', '1', 'yes'].includes((getParam('bplCardholder') || '').toLowerCase()) ? true
-                : ['false', '0', 'no'].includes((getParam('bplCardholder') || '').toLowerCase()) ? false
-                : undefined;
-            const profile = { age, annualIncome, income: annualIncome, gender, state, occupation, casteCategory, bplCardholder };
-            const schemes = await loadSchemes();
-            const scored = schemes
-                .map((s) => {
-                    const result = evaluateEligibility(s.criteria, profile);
-                    return { ...s, eligibilityScore: result.score, matchReasons: result.matchReasons, exclusionReasons: result.exclusionReasons, eligible: result.eligible };
-                })
-                .filter((s) => s.eligible)   // only return eligible schemes
-                .sort((a, b) => b.eligibilityScore - a.eligibilityScore)
-                .slice(0, 8)
-                .map((s) => ({
-                    id: s.id,
-                    code: s.code,
-                    name: s.nameEn,
-                    nameHi: s.nameHi,
-                    benefitRs: s.benefitRs,
-                    matchPercent: s.eligibilityScore,
-                    category: s.category,
-                    summary: s.description.slice(0, 120),
-                    documentsRequired: s.documentsRequired,
-                    matchReasons: s.matchReasons,
-                }));
-            return withToolMeta({ success: true, code: 'OK', schemes: scored, totalFound: scored.length, topScheme: scored[0]?.name ?? 'None', topBenefit: scored[0]?.benefitRs ?? 0 });
-        }
-
-        case 'getApplicationStatus': {
-            const applicationId = getParam('applicationId');
-            if (!applicationId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'applicationId is required' });
-            if (!effectiveUserId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please login and try again.' });
-            const res = await dynamo.send(new GetCommand({ TableName: APPLICATIONS_TABLE, Key: { user_id: effectiveUserId, application_id: applicationId } })).catch(() => ({ Item: undefined } as any));
-            if (res.Item) {
-                const item: any = res.Item;
-                return withToolMeta({ success: true, code: 'OK', applicationId, schemeId: item.scheme_id, schemeName: item.scheme_name, status: item.status || 'submitted', createdAt: item.created_at, updatedAt: item.updated_at, message: `Your application status is ${item.status || 'submitted'}.` });
-            }
-            return withToolMeta({ success: false, code: 'NOT_FOUND', applicationId, message: 'No application found for this reference under your account.' });
-        }
-
-        case 'getUserApplicationsSummary': {
-            if (!effectiveUserId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please login and try again.' });
-            const q = await dynamo.send(new QueryCommand({
-                TableName: APPLICATIONS_TABLE,
-                KeyConditionExpression: 'user_id = :uid',
-                ExpressionAttributeValues: { ':uid': effectiveUserId },
-                ScanIndexForward: false,
-                Limit: 100,
-            })).catch(() => ({ Items: [] } as any));
-            const items = (q.Items ?? []) as Record<string, any>[];
-            const summary = {
-                total: items.length,
-                submitted: items.filter((x) => x.status === 'submitted').length,
-                pending: items.filter((x) => x.status === 'pending').length,
-                approved: items.filter((x) => x.status === 'approved').length,
-                rejected: items.filter((x) => x.status === 'rejected').length,
-            };
-            return withToolMeta({
-                success: true,
-                code: 'OK',
-                summary,
-                applications: items.slice(0, 20).map((x) => ({
-                    applicationId: x.application_id,
-                    schemeId: x.scheme_id,
-                    schemeCode: x.scheme_code,
-                    schemeName: x.scheme_name,
-                    status: x.status,
-                    createdAt: x.created_at,
-                })),
-            });
-        }
-
-        case 'getJobsByProfile': {
-            const state = normalizeText(getParam('state'));
-            const occupation = normalizeText(getParam('occupation'));
-            let jobs: any[] = [];
-            try {
-                const result = await rds.send(new ExecuteStatementCommand({
-                    resourceArn: process.env.DB_CLUSTER_ARN!,
-                    secretArn: process.env.DB_SECRET_ARN!,
-                    database: process.env.DB_NAME || 'vaanisetu',
-                    sql: `SELECT job_id, title, company, state, district, job_type, salary_min, salary_max, description FROM jobs ORDER BY created_at DESC LIMIT 30`,
-                }));
-                jobs = (result.records ?? []).map((r) => ({
-                    id: r[0]?.stringValue,
-                    title: r[1]?.stringValue,
-                    company: r[2]?.stringValue,
-                    state: r[3]?.stringValue,
-                    district: r[4]?.stringValue,
-                    type: r[5]?.stringValue,
-                    salaryMin: r[6]?.longValue ?? 0,
-                    salaryMax: r[7]?.longValue ?? 0,
-                    description: (r[8]?.stringValue ?? ''),
-                    salaryRange: `Rs ${(r[6]?.longValue ?? 0).toLocaleString('en-IN')} - Rs ${(r[7]?.longValue ?? 0).toLocaleString('en-IN')}/month`,
-                }));
-            } catch {
-                if (!ALLOW_LOCAL_DATA_FALLBACK) {
-                    throw new Error('DATA_UNAVAILABLE: jobs datasource is currently unavailable');
+            case 'updateUserProfile': {
+                if (!effectiveUserId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please login and try again.' });
+                const patch: Record<string, any> = {};
+                const directFields = ['name', 'fullName', 'phone', 'state', 'district', 'gender', 'occupation', 'email', 'pincode', 'address', 'casteCategory', 'preferredLanguage'];
+                for (const field of directFields) {
+                    const v = getParam(field);
+                    if (v) patch[field] = v;
                 }
-                const fs = await import('fs/promises');
-                const path = await import('path');
-                const raw = await fs.readFile(path.resolve(process.cwd(), '../data/jobs/sample-jobs.json'), 'utf-8');
-                jobs = JSON.parse(raw).slice(0, 20).map((j: any) => ({
-                    id: j.job_id, title: j.title, company: j.company, state: j.state, district: j.district, type: j.job_type,
-                    salaryMin: j.salary_min ?? 0, salaryMax: j.salary_max ?? 0, description: j.description ?? '',
-                    salaryRange: `Rs ${(j.salary_min ?? 0).toLocaleString('en-IN')} - Rs ${(j.salary_max ?? 0).toLocaleString('en-IN')}/month`,
-                }));
+                if (getParam('age')) patch.age = Number(getParam('age'));
+                if (getParam('annualIncome')) patch.annualIncome = Number(getParam('annualIncome'));
+                if (getParam('bplCardholder')) patch.bplCardholder = ['true', '1', 'yes'].includes(normalizeText(getParam('bplCardholder')));
+                if (!Object.keys(patch).length) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'No profile fields provided.' });
+                if (patch.annualIncome != null) patch.annual_income = patch.annualIncome;
+                if (patch.casteCategory != null) patch.caste_category = patch.casteCategory;
+                if (patch.preferredLanguage != null) patch.preferred_language = patch.preferredLanguage;
+                const current = await dynamo.send(new GetCommand({ TableName: USERS_TABLE, Key: { user_id: effectiveUserId } })).catch(() => ({ Item: {} } as any));
+                const merged = { ...(current.Item ?? {}), ...patch, user_id: effectiveUserId, updated_at: new Date().toISOString() };
+                await dynamo.send(new PutCommand({ TableName: USERS_TABLE, Item: merged }));
+                return withToolMeta({ success: true, code: 'OK', message: 'Profile updated successfully.', updatedFields: Object.keys(patch), profile: merged });
             }
-            const filtered = jobs.filter((j) => {
-                const stateOk = !state || normalizeText(j.state || '').includes(state) || normalizeText(j.district || '').includes(state);
-                const occText = normalizeText(`${j.title || ''} ${j.description || ''}`);
-                const occOk = !occupation || occText.includes(occupation);
-                return stateOk && occOk;
-            });
-            const out = (filtered.length ? filtered : jobs).slice(0, 8);
-            return withToolMeta({ success: true, code: 'OK', jobs: out, totalFound: out.length });
-        }
 
-        default:
-            return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: `Unknown function: ${funcName}` });
+            case 'setPreferredLanguage': {
+                const langRaw = normalizeText(getParam('language') || getParam('preferredLanguage'));
+                const map: Record<string, string> = { english: 'en', en: 'en', hindi: 'hi', hi: 'hi', tamil: 'ta', ta: 'ta', telugu: 'te', te: 'te', marathi: 'mr', mr: 'mr', kannada: 'kn', kn: 'kn' };
+                const language = map[langRaw] || langRaw;
+                if (!['en', 'hi', 'ta', 'te', 'mr', 'kn'].includes(language)) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Unsupported language.' });
+                return executeAgentAction({
+                    ...event,
+                    function: 'updateUserProfile',
+                    parameters: [
+                        { name: 'userId', value: effectiveUserId },
+                        { name: 'preferredLanguage', value: language },
+                    ],
+                }).then((r) => withToolMeta({ ...r, preferredLanguage: language, message: `Default language updated to ${language}.` }));
+            }
+
+            case 'updateUserProfilePatch': {
+                return executeAgentAction({
+                    ...event,
+                    function: 'updateUserProfile',
+                    parameters,
+                });
+            }
+
+            case 'collectProfileGaps': {
+                if (!effectiveUserId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please login and try again.' });
+                const flowType = normalizeText(getParam('flowType') || 'apply');
+                const userRes = await dynamo.send(new GetCommand({ TableName: USERS_TABLE, Key: { user_id: effectiveUserId } })).catch(() => ({ Item: {} } as any));
+                const profile = (userRes.Item ?? {}) as Record<string, any>;
+                const commonRequired = ['name', 'phone', 'state', 'district'];
+                const applyOnly = ['address'];
+                // Scheme discovery should not block on name/phone. Focus on eligibility-driving fields.
+                const schemeRequired = ['age', 'annual_income', 'gender', 'occupation', 'caste_category', 'state'];
+                const required = flowType === 'schemes'
+                    ? schemeRequired
+                    : flowType === 'jobs'
+                        ? ['state', 'occupation']
+                        : [...commonRequired, ...applyOnly];
+                const missing = required.filter((f) => {
+                    const val = profile[f] ?? profile[f.replace('_', '')] ?? profile[f === 'name' ? 'fullName' : f];
+                    return val == null || String(val).trim() === '';
+                });
+                return withToolMeta({
+                    success: true,
+                    code: 'OK',
+                    flowType,
+                    requiredFields: required,
+                    missingFields: missing,
+                    profile,
+                    message: missing.length ? `Missing required profile fields: ${missing.join(', ')}` : 'Profile is complete for this flow.',
+                });
+            }
+
+            case 'confirmApplicationField': {
+                const field = String(getParam('field') || '').trim();
+                const value = String(getParam('value') || '').trim();
+                if (!field || !value) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'field and value are required.' });
+                return executeAgentAction({
+                    ...event,
+                    function: 'updateUserProfile',
+                    parameters: [
+                        { name: 'userId', value: effectiveUserId },
+                        { name: field, value },
+                    ],
+                });
+            }
+
+            case 'getRequiredDocuments': {
+                if (!effectiveUserId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please login and try again.' });
+                const schemes = await loadSchemes();
+                const query = `${getParam('query')} ${getParam('schemeName')} ${getParam('schemeId')}`.trim();
+                const resolved = resolveSchemesTop3(schemes, query);
+                if (resolved.code !== 'OK' || !resolved.best) {
+                    return withToolMeta({ success: false, code: resolved.code, message: 'Unable to identify scheme for required documents.' });
+                }
+                const { providedDocTypes } = await getProfileAndDocumentSummary(effectiveUserId);
+                const required = (resolved.best.documentsRequired || []).map((d) => normalizeRequiredDoc(d));
+                const missing = required.filter((req) => !providedDocTypes.some((p) => docsMatch(req, p)));
+                return withToolMeta({
+                    success: true,
+                    code: 'OK',
+                    schemeId: resolved.best.id,
+                    requiredDocuments: required,
+                    missingDocuments: missing,
+                    message: missing.length ? `Missing documents: ${missing.join(', ')}` : 'All required documents are available.',
+                });
+            }
+
+            case 'requestDocumentUploadSlot': {
+                const documentType = normalizeRequiredDoc(getParam('documentType'));
+                if (!documentType) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'documentType is required.' });
+                return withToolMeta({
+                    success: true,
+                    code: 'OK',
+                    documentType,
+                    uploadApiPath: '/documents/upload',
+                    message: `Upload slot ready for ${documentType}.`,
+                });
+            }
+
+            case 'verifyDocument': {
+                if (!effectiveUserId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please login and try again.' });
+                const documentId = getParam('documentId');
+                if (!documentId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'documentId is required.' });
+                const res = await dynamo.send(new GetCommand({ TableName: DOCUMENTS_TABLE, Key: { user_id: effectiveUserId, document_id: documentId } })).catch(() => ({ Item: undefined } as any));
+                if (!res.Item) return withToolMeta({ success: false, code: 'NOT_FOUND', message: 'Document not found.' });
+                const item: any = res.Item;
+                return withToolMeta({
+                    success: true,
+                    code: 'OK',
+                    documentId,
+                    status: item.status || 'processing',
+                    structuredData: item.structured_data || {},
+                    message: `Document ${documentId} status: ${item.status || 'processing'}.`,
+                });
+            }
+
+            case 'getSchemesByProfile': {
+                const age = parseInt(getParam('age') || '0', 10);
+                const annualIncome = parseInt(getParam('annualIncome') || '0', 10);
+                const gender = getParam('gender');
+                const state = getParam('state');
+                const occupation = getParam('occupation');
+                const casteCategory = getParam('casteCategory');
+                const bplCardholder = ['true', '1', 'yes'].includes((getParam('bplCardholder') || '').toLowerCase()) ? true
+                    : ['false', '0', 'no'].includes((getParam('bplCardholder') || '').toLowerCase()) ? false
+                        : undefined;
+                const profile = { age, annualIncome, income: annualIncome, gender, state, occupation, casteCategory, bplCardholder };
+                const schemes = await loadSchemes();
+                const scored = schemes
+                    .map((s) => {
+                        const result = evaluateEligibility(s.criteria, profile);
+                        return { ...s, eligibilityScore: result.score, matchReasons: result.matchReasons, exclusionReasons: result.exclusionReasons, eligible: result.eligible };
+                    })
+                    .filter((s) => s.eligible)   // only return eligible schemes
+                    .sort((a, b) => b.eligibilityScore - a.eligibilityScore)
+                    .slice(0, 8)
+                    .map((s) => ({
+                        id: s.id,
+                        code: s.code,
+                        name: s.nameEn,
+                        nameHi: s.nameHi,
+                        benefitRs: s.benefitRs,
+                        matchPercent: s.eligibilityScore,
+                        category: s.category,
+                        summary: s.description.slice(0, 120),
+                        documentsRequired: s.documentsRequired,
+                        matchReasons: s.matchReasons,
+                    }));
+                return withToolMeta({ success: true, code: 'OK', schemes: scored, totalFound: scored.length, topScheme: scored[0]?.name ?? 'None', topBenefit: scored[0]?.benefitRs ?? 0 });
+            }
+
+            case 'getApplicationStatus': {
+                const applicationId = getParam('applicationId');
+                if (!applicationId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'applicationId is required' });
+                if (!effectiveUserId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please login and try again.' });
+                const res = await dynamo.send(new GetCommand({ TableName: APPLICATIONS_TABLE, Key: { user_id: effectiveUserId, application_id: applicationId } })).catch(() => ({ Item: undefined } as any));
+                if (res.Item) {
+                    const item: any = res.Item;
+                    return withToolMeta({ success: true, code: 'OK', applicationId, schemeId: item.scheme_id, schemeName: item.scheme_name, status: item.status || 'submitted', createdAt: item.created_at, updatedAt: item.updated_at, message: `Your application status is ${item.status || 'submitted'}.` });
+                }
+                return withToolMeta({ success: false, code: 'NOT_FOUND', applicationId, message: 'No application found for this reference under your account.' });
+            }
+
+            case 'getUserApplicationsSummary': {
+                if (!effectiveUserId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please login and try again.' });
+                const q = await dynamo.send(new QueryCommand({
+                    TableName: APPLICATIONS_TABLE,
+                    KeyConditionExpression: 'user_id = :uid',
+                    ExpressionAttributeValues: { ':uid': effectiveUserId },
+                    ScanIndexForward: false,
+                    Limit: 100,
+                })).catch(() => ({ Items: [] } as any));
+                const items = (q.Items ?? []) as Record<string, any>[];
+                const summary = {
+                    total: items.length,
+                    submitted: items.filter((x) => x.status === 'submitted').length,
+                    pending: items.filter((x) => x.status === 'pending').length,
+                    approved: items.filter((x) => x.status === 'approved').length,
+                    rejected: items.filter((x) => x.status === 'rejected').length,
+                };
+                return withToolMeta({
+                    success: true,
+                    code: 'OK',
+                    summary,
+                    applications: items.slice(0, 20).map((x) => ({
+                        applicationId: x.application_id,
+                        schemeId: x.scheme_id,
+                        schemeCode: x.scheme_code,
+                        schemeName: x.scheme_name,
+                        status: x.status,
+                        createdAt: x.created_at,
+                    })),
+                });
+            }
+
+            case 'getJobsByProfile': {
+                const state = normalizeText(getParam('state'));
+                const occupation = normalizeText(getParam('occupation'));
+                let jobs: any[] = [];
+                try {
+                    const result = await rds.send(new ExecuteStatementCommand({
+                        resourceArn: process.env.DB_CLUSTER_ARN!,
+                        secretArn: process.env.DB_SECRET_ARN!,
+                        database: process.env.DB_NAME || 'vaanisetu',
+                        sql: `SELECT job_id, title, company, state, district, job_type, salary_min, salary_max, description FROM jobs ORDER BY created_at DESC LIMIT 30`,
+                    }));
+                    jobs = (result.records ?? []).map((r) => ({
+                        id: r[0]?.stringValue,
+                        title: r[1]?.stringValue,
+                        company: r[2]?.stringValue,
+                        state: r[3]?.stringValue,
+                        district: r[4]?.stringValue,
+                        type: r[5]?.stringValue,
+                        salaryMin: r[6]?.longValue ?? 0,
+                        salaryMax: r[7]?.longValue ?? 0,
+                        description: (r[8]?.stringValue ?? ''),
+                        salaryRange: `Rs ${(r[6]?.longValue ?? 0).toLocaleString('en-IN')} - Rs ${(r[7]?.longValue ?? 0).toLocaleString('en-IN')}/month`,
+                    }));
+                } catch {
+                    if (!ALLOW_LOCAL_DATA_FALLBACK) {
+                        throw new Error('DATA_UNAVAILABLE: jobs datasource is currently unavailable');
+                    }
+                    const fs = await import('fs/promises');
+                    const path = await import('path');
+                    const raw = await fs.readFile(path.resolve(process.cwd(), '../data/jobs/sample-jobs.json'), 'utf-8');
+                    jobs = JSON.parse(raw).slice(0, 20).map((j: any) => ({
+                        id: j.job_id, title: j.title, company: j.company, state: j.state, district: j.district, type: j.job_type,
+                        salaryMin: j.salary_min ?? 0, salaryMax: j.salary_max ?? 0, description: j.description ?? '',
+                        salaryRange: `Rs ${(j.salary_min ?? 0).toLocaleString('en-IN')} - Rs ${(j.salary_max ?? 0).toLocaleString('en-IN')}/month`,
+                    }));
+                }
+                const filtered = jobs.filter((j) => {
+                    const stateOk = !state || normalizeText(j.state || '').includes(state) || normalizeText(j.district || '').includes(state);
+                    const occText = normalizeText(`${j.title || ''} ${j.description || ''}`);
+                    const occOk = !occupation || occText.includes(occupation);
+                    return stateOk && occOk;
+                });
+                const out = (filtered.length ? filtered : jobs).slice(0, 8);
+                return withToolMeta({ success: true, code: 'OK', jobs: out, totalFound: out.length });
+            }
+
+            default:
+                return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: `Unknown function: ${funcName}` });
         }
     } catch (error: any) {
         logger.error('executeAgentAction failed', { funcName, error: error?.message || String(error) });

@@ -90,23 +90,32 @@ function getLangLabel(language: string): string {
 function buildSystemPrompt(langLabel: string, intent: OrchestratorInput['intent']): string {
   const base = `You are VaaniSetu, a warm and helpful AI assistant for rural Indian citizens.
 You help people discover government welfare schemes and jobs, check eligibility, and apply.
-Always respond in ${langLabel}. Be concise (2-4 sentences), empathetic, and non-technical.
+You MUST respond ENTIRELY in ${langLabel} using its native script. Do NOT mix in English unless ${langLabel} IS English.
+Be concise (2-4 sentences), empathetic, and non-technical.
 Use natural conversational language — no bullet-point lists unless the user asked for a list.
 IMPORTANT RULES:
 - Only mention schemes and facts provided in <DATA> tags below. Never invent scheme names, benefit amounts, or eligibility rules.
 - If a scheme shows "exclusionReasons", NEVER suggest that scheme to the user.
 - If you mention a benefit amount, use the exact ₹ value from the data provided.
 - Acknowledge the user's background (occupation, state, income) when responding about eligibility.
-- AWS services powering this response: Amazon Bedrock Nova Pro, Amazon DynamoDB, Amazon Lambda.`;
+- AWS services powering this response: Amazon Bedrock Nova Pro, Amazon DynamoDB, Amazon Lambda.
+
+Language specific instructions for ${langLabel}:
+- If ${langLabel} is Hindi: respond in Devanagari script. Use simple everyday Hindi, not Sanskritized.
+- If ${langLabel} is Tamil: respond in Tamil script (தமிழ்). Use formal but friendly Tamil.
+- If ${langLabel} is Telugu: respond in Telugu script (తెలుగు). Use conversational Telugu.
+- If ${langLabel} is Kannada: respond in Kannada script (ಕನ್ನಡ). Use everyday Kannada.
+- If ${langLabel} is Marathi: respond in Devanagari script. Use conversational Marathi.
+- If ${langLabel} is English: respond in simple Indian English, using occasional Hindi terms when natural.`;
 
   const intentHints: Record<string, string> = {
-    schemes: `When listing schemes: name 2-3 top matches with their ₹ benefit amounts. End with "Say 'apply for <scheme name>' to continue."`,
+    schemes: `When listing schemes: name 2-3 top matches with their ₹ benefit amounts. End with a prompt to apply.`,
     scheme_detail: `Describe the scheme in 2-3 sentences covering: what it gives, who qualifies, and how to apply.`,
     jobs: `List available jobs with salary ranges. Mention the location and employer.`,
-    apply: `Walk the user through the application step: confirm scheme details and ask them to say "confirm application".`,
+    apply: `Walk the user through the application step: confirm scheme details and ask them to confirm.`,
     status: `State the application status clearly and reassure the user.`,
     profile_update: `Confirm what was updated and what it means for their eligibility.`,
-    language_update: `Confirm language change warmly.`,
+    language_update: `Confirm language change warmly in the NEW language.`,
     general: `Answer helpfully. If asked about a scheme not in the data, say you'll look it up.`,
   };
 
@@ -130,6 +139,9 @@ function buildDataContext(input: OrchestratorInput): string {
       p.occupation ? `Occupation: ${p.occupation}` : null,
       (p.annualIncome || p.annual_income) ? `Annual Income: ₹${(Number(p.annualIncome || p.annual_income)).toLocaleString('en-IN')}` : null,
       p.state ? `State: ${p.state}` : null,
+      p.district ? `District: ${p.district}` : null,
+      p.phone ? `Phone: ${p.phone}` : null,
+      p.address ? `Address: ${p.address}` : null,
     ].filter(Boolean);
     if (items.length) parts.push(`<USER_PROFILE>\n${items.join('\n')}\n</USER_PROFILE>`);
   }
@@ -198,7 +210,7 @@ export async function generateResponse(input: OrchestratorInput): Promise<Orches
     system: [{ text: systemPrompt }],
     messages,
     inferenceConfig: {
-      maxTokens: 600,
+      maxTokens: 900,
       temperature: 0.55,
       topP: 0.85,
     },

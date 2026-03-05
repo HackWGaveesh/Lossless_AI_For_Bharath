@@ -390,7 +390,8 @@ exports.handler = async (event) => {
         REGION: this.region,
         NOTIFICATION_TOPIC_ARN: notificationTopic.topicArn,
         BUDGET_MODE: budgetMode,
-        ALLOW_LOCAL_DATA_FALLBACK: String(process.env.ALLOW_LOCAL_DATA_FALLBACK || 'false').toLowerCase(),
+        ALLOW_LOCAL_DATA_FALLBACK: String(process.env.ALLOW_LOCAL_DATA_FALLBACK || 'true').toLowerCase(),
+        SESSION_TTL_SECONDS: '3600',
       },
     };
 
@@ -420,7 +421,7 @@ exports.handler = async (event) => {
       ...nodeOptions,
       entry: path.join(backendPath, 'api/schemes/search.ts'),
       handler: 'handler',
-      timeout: cdk.Duration.seconds(60),
+      timeout: cdk.Duration.seconds(90),
       memorySize: 1024,
       environment: {
         ...nodeOptions.environment,
@@ -494,6 +495,7 @@ exports.handler = async (event) => {
       ...nodeOptions,
       entry: path.join(backendPath, 'api/applications/create.ts'),
       handler: 'handler',
+      timeout: cdk.Duration.seconds(60),
       environment: {
         ...nodeOptions.environment,
         APPLICATIONS_TABLE: applicationsTable.tableName,
@@ -542,13 +544,20 @@ exports.handler = async (event) => {
       ...nodeOptions,
       entry: path.join(backendPath, 'api/voice/query.ts'),
       handler: 'handler',
-      timeout: cdk.Duration.seconds(30),
-      memorySize: 512,
+      timeout: cdk.Duration.seconds(90),
+      memorySize: 1024,
       environment: {
         ...nodeOptions.environment,
         BEDROCK_AGENT_ID: process.env.BEDROCK_AGENT_ID || '',
         BEDROCK_AGENT_ALIAS_ID: process.env.BEDROCK_AGENT_ALIAS_ID || 'TSTALIASID',
         BEDROCK_GUARDRAIL_ID: process.env.BEDROCK_GUARDRAIL_ID || '',
+        DOCUMENTS_TABLE: documentsTable.tableName,
+        BEDROCK_AGENT_ENABLE_TRACE: 'true',
+        BEDROCK_AGENT_TIMEOUT_MS: '55000',
+        BEDROCK_AGENT_FALLBACK_ALIAS_ID: process.env.BEDROCK_AGENT_FALLBACK_ALIAS_ID || '',
+        BEDROCK_GUARDRAIL_VERSION: process.env.BEDROCK_GUARDRAIL_VERSION || 'DRAFT',
+        APPLICATION_CONFIRMATION_SECRET: process.env.APPLICATION_CONFIRMATION_SECRET || 'vaanisetu-prod-secret-change-me',
+        SESSION_TTL_SECONDS: '3600',
       },
     });
     const voiceTranscribeFn = new lambdaNode.NodejsFunction(this, 'VoiceTranscribeFunction', {
