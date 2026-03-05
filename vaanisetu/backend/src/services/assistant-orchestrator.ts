@@ -298,14 +298,41 @@ async function maybeHandleStructuredWorkflow(args: {
   if (
     intent === 'none'
     && sessionPendingConfirmation?.type === 'application_confirm'
-    && /\b(yes|confirm|haan|haanji|proceed)\b/.test(normalized)
+    && (/\b(yes|confirm|haan|haanji|proceed|ho|theek hai|bilkul|zaroor|accha|seri|avunu)\b/.test(normalized)
+      || /சரி|அவுனு|ஆமாம்/.test(transcript)
+      || /అవును|సరే|ఓకే/.test(transcript)
+      || /ಹೌದು|ಸರಿ|ಓಕೆ/.test(transcript)
+      || /हो|ठीक है|हाँ|बिल्कुल/.test(transcript))
   ) {
     intent = 'apply';
   }
   if (intent === 'none') {
     const patch = parseProfilePatchFromTranscript(transcript);
-    if (Object.keys(patch).length > 0) intent = 'profile_update';
-    else return null;
+    if (Object.keys(patch).length > 0) {
+      intent = 'profile_update';
+    } else {
+      // Last-resort: ask Nova Pro to classify
+      try {
+        const classifyRes = await bedrockRuntime.send(new ConverseCommand({
+          modelId: MODEL_ID,
+          messages: [{
+            role: 'user',
+            content: [{ text: `Classify this message into exactly one word from: schemes, apply, status, jobs, documents, profile, other\nMessage: "${transcript.slice(0, 200)}"\nReply with ONE word only, no punctuation.` }],
+          }],
+          inferenceConfig: { maxTokens: 5, temperature: 0 },
+        }));
+        const cls = (classifyRes.output?.message?.content?.[0]?.text || '').trim().toLowerCase();
+        if (cls === 'schemes') intent = 'schemes';
+        else if (cls === 'apply') intent = 'apply';
+        else if (cls === 'status') intent = 'status';
+        else if (cls === 'jobs') intent = 'jobs';
+        else if (cls === 'documents') intent = 'documents';
+        else if (cls === 'profile') intent = 'profile_update';
+      } catch {
+        // classification failed, fall through to directModelCall
+      }
+      if (intent === 'none') return null;
+    }
   }
 
   if (intent === 'greeting') {
@@ -345,16 +372,50 @@ async function maybeHandleStructuredWorkflow(args: {
   if (intent === 'status') {
     const appRef = extractApplicationRef(transcript) || extractApplicationRefFromContext(sessionContext);
     if (!appRef) {
-      return {
-        actionCalled: 'getApplicationStatus',
-        responseText: 'Please share your application reference number (for example: VS-XXXX).',
-        actionResultType: 'needs_application_reference',
-        execution: {
-          intent,
-          confidence: 0.95,
-          entities: { applicationRef: null },
-          steps: ['extract_ref_failed'],
+      // No specific ref — list all applications for this user
+      const summary = await runAction('getUserApplicationsSummary', [
+        { name: 'userId', value: userId },
+      ]);
+      const apps = Array.isArray(summary?.applications) ? summary.applications : [];
+      if (!apps.length) {
+        const noAppsOrch = await safeGenerateResponse(
+          {
+            intent: 'status', language: effectiveLanguage, transcript,
+            additionalContext: 'User has no applications yet. Encourage them to explore schemes and apply.'
+          },
+          'You have not submitted any applications yet. Would you like to see schemes you can apply for?'
+        );
+        return {
+          actionCalled: 'getUserApplicationsSummary',
+          responseText: noAppsOrch.responseText,
+          serviceTrace: noAppsOrch.serviceTrace,
+          actionResultType: 'no_applications',
+          execution: { intent, confidence: 0.9, steps: ['getUserApplicationsSummary', 'novapro_orchestrator'], tool: 'getUserApplicationsSummary', dataSource: 'dynamodb' },
+        };
+      }
+      const appsContext = apps.slice(0, 5).map((a: any) =>
+        `${a.applicationId}: ${a.schemeName || a.schemeCode || 'Unknown scheme'} — ${a.status} (${a.createdAt?.slice(0, 10) || ''})`
+      ).join('\n');
+      const summaryOrch = await safeGenerateResponse(
+        {
+          intent: 'status', language: effectiveLanguage, transcript,
+          additionalContext: `User's applications:\n${appsContext}\nTotal: ${summary.summary?.total || apps.length}`
         },
+        `You have ${apps.length} application(s). Latest: ${apps[0]?.applicationId} — ${apps[0]?.status}.`
+      );
+      return {
+        actionCalled: 'getUserApplicationsSummary',
+        responseText: summaryOrch.responseText,
+        serviceTrace: summaryOrch.serviceTrace,
+        cards: apps.slice(0, 3).map((a: any) => ({
+          type: 'application_status',
+          applicationRef: a.applicationId,
+          status: a.status,
+          schemeName: a.schemeName || a.schemeCode,
+        })),
+        grounding: { sources: ['applications_table'] },
+        actionResultType: 'status_list',
+        execution: { intent, confidence: 0.9, steps: ['getUserApplicationsSummary', 'novapro_orchestrator'], tool: 'getUserApplicationsSummary', dataSource: 'dynamodb' },
       };
     }
     const parsed = await runAction('getApplicationStatus', [
@@ -479,16 +540,23 @@ async function maybeHandleStructuredWorkflow(args: {
     if (isUpload) {
       const documentType = parseDocumentType(transcript);
       if (!documentType) {
+        const orchNoType = await safeGenerateResponse(
+          {
+            intent: 'documents', language: effectiveLanguage, transcript,
+            additionalContext: 'User wants to upload a document but did not specify which one. Ask them which document: PAN, Aadhaar, income certificate, or bank passbook.'
+          },
+          'Please tell me which document to upload: PAN, Aadhaar, income certificate, or bank passbook.'
+        );
         return {
           actionCalled: 'requestDocumentUploadSlot',
-          responseText:
-            'Please tell me which document you want to upload, for example PAN, Aadhaar, income certificate, or bank passbook.',
+          responseText: orchNoType.responseText,
+          serviceTrace: orchNoType.serviceTrace,
           actionResultType: 'document_type_required',
           execution: {
             intent,
             confidence: 0.8,
             entities: {},
-            steps: ['document_type_parse_failed'],
+            steps: ['document_type_parse_failed', 'novapro_orchestrator'],
           },
         };
       }
@@ -526,16 +594,23 @@ async function maybeHandleStructuredWorkflow(args: {
       || extractSchemeHintFromDocumentQuery(transcript)
       || extractPendingSchemeFromContext(sessionContext);
     if (!schemeHint) {
+      const orchNoScheme = await safeGenerateResponse(
+        {
+          intent: 'documents', language: effectiveLanguage, transcript,
+          additionalContext: 'User wants to know required documents but did not specify a scheme. Ask which scheme they are applying for.'
+        },
+        'Please tell me which scheme you need documents for.'
+      );
       return {
         actionCalled: 'getRequiredDocuments',
-        responseText:
-          'Please tell me which scheme you need documents for, for example: documents required for Stand-Up India.',
+        responseText: orchNoScheme.responseText,
+        serviceTrace: orchNoScheme.serviceTrace,
         actionResultType: 'scheme_required_for_documents',
         execution: {
           intent,
           confidence: 0.82,
           entities: {},
-          steps: ['scheme_hint_missing'],
+          steps: ['scheme_hint_missing', 'novapro_orchestrator'],
         },
       };
     }
@@ -568,11 +643,19 @@ async function maybeHandleStructuredWorkflow(args: {
     }
     const missing = Array.isArray(docs?.missingDocuments) ? docs.missingDocuments : [];
     const required = Array.isArray(docs?.requiredDocuments) ? docs.requiredDocuments : [];
+    const docsOrch = await safeGenerateResponse(
+      {
+        intent: 'documents', language: effectiveLanguage, transcript,
+        additionalContext: missing.length
+          ? `Missing documents for ${schemeHint}: ${missing.join(', ')}. All required: ${required.join(', ')}.`
+          : `All required documents for ${schemeHint} are already uploaded.`
+      },
+      missing.length ? `Missing: ${missing.join(', ')}.` : 'All documents ready.'
+    );
     return {
       actionCalled: 'getRequiredDocuments',
-      responseText: missing.length
-        ? `You are missing these documents: ${missing.join(', ')}. You can upload them now.`
-        : 'All required documents are already available for this scheme.',
+      responseText: docsOrch.responseText,
+      serviceTrace: docsOrch.serviceTrace,
       cards: [
         ...missing.map((d: string) => ({ type: 'document_upload', documentType: d, openPage: '/documents' })),
         { type: 'document_requirements', requiredDocuments: required, missingDocuments: missing, schemeHint },
@@ -583,7 +666,7 @@ async function maybeHandleStructuredWorkflow(args: {
         intent,
         confidence: 0.87,
         entities: { schemeHint, missingCount: missing.length },
-        steps: ['getRequiredDocuments'],
+        steps: ['getRequiredDocuments', 'novapro_orchestrator'],
       },
     };
   }
@@ -620,17 +703,31 @@ async function maybeHandleStructuredWorkflow(args: {
         },
       };
     }
+    const newLangCode = `${preferred}-IN`;
+    const langFallback = `Default language updated to ${preferred}.`;
+    const langOrch = await safeGenerateResponse(
+      {
+        intent: 'language_update',
+        language: newLangCode,
+        transcript,
+        additionalContext: `Language was just changed to ${preferred}. Confirm warmly in this new language.`,
+      },
+      langFallback,
+    );
     return {
       actionCalled: 'setPreferredLanguage',
-      responseText: parsed?.message || `Default language updated to ${preferred}.`,
+      responseText: langOrch.responseText || langFallback,
       cards: [{ type: 'language_updated', language: preferred }],
       grounding: { sources: ['users_table'] },
+      serviceTrace: langOrch.serviceTrace,
       actionResultType: parsed?.success ? 'language_updated' : 'language_error',
       execution: {
         intent,
         confidence: 0.93,
         entities: { preferredLanguage: preferred },
-        steps: ['setPreferredLanguage'],
+        steps: ['setPreferredLanguage', 'novapro_orchestrator'],
+        tool: 'setPreferredLanguage',
+        dataSource: 'dynamodb',
       },
     };
   }
@@ -674,11 +771,24 @@ async function maybeHandleStructuredWorkflow(args: {
         },
       };
     }
-    const updatedFields = Array.isArray(parsed?.updatedFields) ? parsed.updatedFields.join(', ') : '';
     const updatedFieldsArray = Array.isArray(parsed?.updatedFields) ? parsed.updatedFields : [];
-    const profileUpdatedText = parsed?.success
-      ? `Profile updated successfully.${updatedFields ? ` Updated fields: ${updatedFields}.` : ''}`
-      : parsed?.message || 'Could not update profile right now.';
+    const updatedFieldsList = updatedFieldsArray.join(', ');
+    const profileFallback = parsed?.success
+      ? `Profile updated: ${updatedFieldsList || 'your details'}.`
+      : parsed?.message || 'Could not update profile.';
+    const profileOrch = await safeGenerateResponse(
+      {
+        intent: 'profile_update',
+        language: effectiveLanguage,
+        transcript,
+        userProfile: patch,
+        additionalContext: parsed?.success
+          ? `Updated fields: ${updatedFieldsList}. Profile is now more complete for scheme matching.`
+          : `Profile update failed: ${parsed?.message || 'unknown error'}`,
+      },
+      profileFallback,
+    );
+    const profileUpdatedText = profileOrch.responseText || profileFallback;
 
     // If the previous assistant turn asked for scheme profile gaps, auto-continue scheme discovery.
     if (parsed?.success && shouldResumeSchemesAfterProfileUpdate(sessionContext)) {
@@ -687,7 +797,7 @@ async function maybeHandleStructuredWorkflow(args: {
         runAction,
         profile: refreshedProfile,
         transcript,
-        language,
+        language: effectiveLanguage,
         intent,
       });
       return {
@@ -703,6 +813,7 @@ async function maybeHandleStructuredWorkflow(args: {
         grounding: {
           sources: Array.from(new Set(['users_table', ...(schemeFollowup.grounding?.sources ?? [])])),
         },
+        serviceTrace: profileOrch.serviceTrace,
         actionResultType:
           schemeFollowup.actionResultType === 'schemes'
             ? 'profile_updated_and_schemes'
@@ -710,7 +821,7 @@ async function maybeHandleStructuredWorkflow(args: {
         execution: {
           ...(schemeFollowup.execution ?? {}),
           intent: 'profile_update',
-          steps: ['updateUserProfile', ...((schemeFollowup.execution?.steps ?? []))],
+          steps: ['updateUserProfile', 'novapro_orchestrator', ...((schemeFollowup.execution?.steps ?? []))],
         },
       };
     }
@@ -718,6 +829,7 @@ async function maybeHandleStructuredWorkflow(args: {
     return {
       actionCalled: 'updateUserProfile',
       responseText: profileUpdatedText,
+      serviceTrace: profileOrch.serviceTrace,
       cards: parsed?.success
         ? [
           {
@@ -732,7 +844,9 @@ async function maybeHandleStructuredWorkflow(args: {
         intent,
         confidence: 0.88,
         entities: patch,
-        steps: ['updateUserProfile'],
+        steps: ['updateUserProfile', 'novapro_orchestrator'],
+        tool: 'updateUserProfile',
+        dataSource: 'dynamodb',
       },
     };
   }
@@ -959,7 +1073,12 @@ async function maybeHandleStructuredWorkflow(args: {
     };
   }
 
-  const isConfirmIntent = /\b(confirm|yes|proceed|submit now|go ahead|haan|haanji)\b/.test(normalized);
+  const isConfirmIntent =
+    /\b(confirm|yes|proceed|submit now|go ahead|haan|haanji|ho|theek hai|bilkul|zaroor|accha|seri|avunu)\b/.test(normalized)
+    || /சரி|அவுனு|ஆமாம்/.test(transcript)
+    || /అవును|సరే|ఓకే/.test(transcript)
+    || /ಹೌದು|ಸರಿ|ಓಕೆ/.test(transcript)
+    || /हो|ठीक है|हाँ|बिल्कुल/.test(transcript);
   const confirmConfidence = confirmIntentConfidence(normalized);
   if (intent !== 'apply') return null;
 
@@ -982,7 +1101,12 @@ async function maybeHandleStructuredWorkflow(args: {
     const index = Number(activeFieldConfirmation.index || 0);
     const currentField = fieldOrder[index];
     const values = { ...(activeFieldConfirmation.values || {}) } as Record<string, string>;
-    const isAffirm = /\b(yes|ok|confirm|haan|haanji|correct|right)\b/.test(normalized);
+    const isAffirm =
+      /\b(yes|ok|okay|confirm|haan|haanji|correct|right|ho|accha|theek|seri|avunu)\b/.test(normalized)
+      || /சரி|ஆமாம்/.test(transcript)
+      || /అవును|సరే/.test(transcript)
+      || /ಹೌದು|ಸರಿ/.test(transcript)
+      || /हो|हाँ|ठीक/.test(transcript);
     const parsedChange = parseFieldChangeCandidate(transcript, currentField);
     const schemeHintFromFieldFlow = String(activeFieldConfirmation.schemeHint || schemeHint || '').trim();
     const prepareAfterFieldConfirmation = async (): Promise<ApplyFlowResult> => {
@@ -1070,7 +1194,7 @@ async function maybeHandleStructuredWorkflow(args: {
       }
       return {
         actionCalled: 'confirmApplicationField',
-        responseText: buildFieldPrompt(nextField, values[nextField]),
+        responseText: buildFieldPrompt(nextField, values[nextField], effectiveLanguage),
         pendingConfirmation: {
           ...activeFieldConfirmation,
           type: 'apply_field_confirmation',
@@ -1123,7 +1247,7 @@ async function maybeHandleStructuredWorkflow(args: {
       }
       return {
         actionCalled: 'confirmApplicationField',
-        responseText: `Updated ${currentField}. ${buildFieldPrompt(nextField, values[nextField])}`,
+        responseText: `Updated ${currentField}. ${buildFieldPrompt(nextField, values[nextField], effectiveLanguage)}`,
         pendingConfirmation: {
           ...activeFieldConfirmation,
           type: 'apply_field_confirmation',
@@ -1150,7 +1274,7 @@ async function maybeHandleStructuredWorkflow(args: {
 
     return {
       actionCalled: 'confirmApplicationField',
-      responseText: `Please confirm only your ${currentField} for now. ${buildFieldPrompt(currentField, values[currentField] || '')}`,
+      responseText: `Please confirm only your ${currentField} for now. ${buildFieldPrompt(currentField, values[currentField] || '', effectiveLanguage)}`,
       pendingConfirmation: {
         ...activeFieldConfirmation,
         type: 'apply_field_confirmation',
@@ -1238,9 +1362,20 @@ async function maybeHandleStructuredWorkflow(args: {
       };
     }
     if (parsed?.success === true) {
+      const submitFallback = `Application submitted! Reference: ${parsed.applicationId || 'N/A'}.`;
+      const submitOrch = await safeGenerateResponse(
+        {
+          intent: 'apply',
+          language: effectiveLanguage,
+          transcript,
+          additionalContext: `Application submitted successfully. Reference number: ${parsed.applicationId}. Scheme: ${parsed.schemeName || schemeHint}. Congratulate the user warmly.`,
+        },
+        submitFallback,
+      );
       return {
         actionCalled: 'submitApplication',
-        responseText: parsed.message || 'Application submitted.',
+        responseText: submitOrch.responseText || submitFallback,
+        serviceTrace: submitOrch.serviceTrace,
         applicationSubmitted: true,
         applicationId: parsed.applicationId,
         pendingConfirmation: null,
@@ -1258,7 +1393,9 @@ async function maybeHandleStructuredWorkflow(args: {
           intent,
           confidence: 0.94,
           entities: { schemeHint },
-          steps: ['submitApplication'],
+          steps: ['submitApplication', 'novapro_orchestrator'],
+          tool: 'submitApplication',
+          dataSource: 'dynamodb',
         },
       };
     }
@@ -1349,7 +1486,7 @@ async function maybeHandleStructuredWorkflow(args: {
     const firstField = fieldOrder[0];
     return {
       actionCalled: 'confirmApplicationField',
-      responseText: `Before submitting, let's confirm details. ${buildFieldPrompt(firstField, values[firstField])}`,
+      responseText: `Before submitting, let's confirm details. ${buildFieldPrompt(firstField, values[firstField], effectiveLanguage)}`,
       pendingConfirmation: {
         type: 'apply_field_confirmation',
         index: 0,
@@ -1395,9 +1532,6 @@ async function maybeHandleStructuredWorkflow(args: {
     };
   }
   if (parsed?.success === true && parsed?.code === 'NEEDS_CONFIRMATION' && parsed?.scheme) {
-    const missing = Array.isArray(parsed.missingDocuments) && parsed.missingDocuments.length > 0
-      ? ` Missing documents: ${parsed.missingDocuments.join(', ')}.`
-      : '';
     const missingDocs = Array.isArray(parsed.missingDocuments) ? parsed.missingDocuments : [];
     const documentCards = missingDocs.map((d: string) => ({
       type: 'document_upload',
@@ -1405,29 +1539,47 @@ async function maybeHandleStructuredWorkflow(args: {
       uploadApiPath: '/documents/upload',
       openPage: '/documents',
     }));
+    const prepFallback = `Applying for ${parsed.scheme.nameEn || parsed.scheme.name} (up to \u20B9${Number(parsed.scheme.benefitRs || 0).toLocaleString('en-IN')}).${missingDocs.length ? ` Missing: ${missingDocs.join(', ')}.` : ''} Say confirm to proceed.`;
+    const prepOrch = await safeGenerateResponse(
+      {
+        intent: 'apply',
+        language: effectiveLanguage,
+        transcript,
+        schemes: [{
+          id: parsed.scheme.id || parsed.scheme.code,
+          code: parsed.scheme.code,
+          name: parsed.scheme.nameEn || parsed.scheme.name,
+          nameHi: parsed.scheme.nameHi,
+          description: parsed.scheme.description || '',
+          benefitRs: Number(parsed.scheme.benefitRs || 0),
+          category: parsed.scheme.category || '',
+        }],
+        additionalContext: `User wants to apply. Missing documents: ${missingDocs.join(', ') || 'none'}. Ask them to confirm.`,
+      },
+      prepFallback,
+    );
     return {
       actionCalled: 'prepareApplication',
-      responseText: `You are applying for ${parsed.scheme.nameEn || parsed.scheme.name
-        } (benefit up to Rs ${Number(parsed.scheme.benefitRs || 0).toLocaleString('en-IN')}).${missing} Say: confirm application for ${parsed.scheme.nameEn || parsed.scheme.name
-        }.`,
+      responseText: prepOrch.responseText || prepFallback,
+      serviceTrace: prepOrch.serviceTrace,
       pendingConfirmation: {
         type: 'application_confirm',
         confirmationToken: parsed.confirmationToken || null,
         scheme: parsed.scheme,
-        missingDocuments: parsed.missingDocuments || [],
+        missingDocuments: missingDocs,
       },
       pendingAction: {
         type: 'application_confirm',
         confirmationToken: parsed.confirmationToken || null,
         scheme: parsed.scheme,
-        missingDocuments: parsed.missingDocuments || [],
+        missingDocuments: missingDocs,
       },
       cards: [
         {
           type: 'application_confirm',
           confirmationToken: parsed.confirmationToken || null,
           scheme: parsed.scheme,
-          missingDocuments: parsed.missingDocuments || [],
+          missingDocuments: missingDocs,
         },
         ...documentCards,
       ],
@@ -1437,7 +1589,9 @@ async function maybeHandleStructuredWorkflow(args: {
         intent,
         confidence: 0.94,
         entities: { schemeHint },
-        steps: ['prepareApplication'],
+        steps: ['prepareApplication', 'novapro_orchestrator'],
+        tool: 'prepareApplication',
+        dataSource: 'aurora',
       },
     };
   }
@@ -1563,18 +1717,45 @@ async function buildSchemesEligibilityResponse(args: {
   ]);
   const missingFields: string[] = Array.isArray(gapCheck?.missingFields) ? gapCheck.missingFields : [];
   if (missingFields.length > 0) {
-    return {
-      actionCalled: 'collectProfileGaps',
-      responseText: `To find suitable schemes, please share: ${missingFields.slice(0, 4).join(', ')}.`,
-      actionResultType: 'needs_profile_fields',
-      cards: [{ type: 'profile_gaps', flowType: 'schemes', missingFields }],
-      grounding: { sources: ['users_table'] },
-      execution: {
-        intent,
-        confidence: 0.92,
-        entities: { missingFields },
-        steps: ['collectProfileGaps'],
+    // Still fetch top schemes for new users (don't hard-block)
+    const topSchemes = await runAction('getSchemesByProfile', [
+      { name: 'age', value: '' },
+      { name: 'annualIncome', value: '' },
+      { name: 'gender', value: '' },
+      { name: 'state', value: '' },
+      { name: 'occupation', value: '' },
+      { name: 'casteCategory', value: '' },
+    ]);
+    const schemes = Array.isArray(topSchemes?.schemes) ? topSchemes.schemes.slice(0, 4) : [];
+    const schemeSummaries = schemes.map((s: any) => ({
+      id: s.id || s.code, code: s.code, name: s.name, nameHi: s.nameHi,
+      description: s.summary || '', benefitRs: Number(s.benefitRs || 0),
+      category: s.category || '', eligibilityScore: s.matchPercent || 50,
+      matchReasons: Array.isArray(s.matchReasons) ? s.matchReasons : [],
+    }));
+
+    const fallback = `Here are some popular schemes. To get personalized matches, please share: ${missingFields.slice(0, 3).join(', ')}.`;
+    const orchGap = await safeGenerateResponse(
+      {
+        intent: 'schemes',
+        language,
+        transcript,
+        schemes: schemeSummaries,
+        additionalContext: `Showing general schemes. For personalized results, user should share: ${missingFields.slice(0, 3).join(', ')}.`,
       },
+      fallback
+    );
+    return {
+      actionCalled: 'getSchemesByProfile',
+      responseText: orchGap.responseText || fallback,
+      serviceTrace: orchGap.serviceTrace,
+      actionResultType: 'schemes_partial',
+      cards: [
+        ...schemeSummaries.slice(0, 3).map((s: any) => ({ type: 'scheme_card', ...s })),
+        { type: 'profile_gaps', flowType: 'schemes', missingFields: missingFields.slice(0, 4) },
+      ],
+      grounding: { sources: ['schemes_table', 'users_table'] },
+      execution: { intent, confidence: 0.85, steps: ['collectProfileGaps', 'getSchemesByProfile', 'novapro_orchestrator'] },
     };
   }
 
@@ -1726,10 +1907,47 @@ function getProfileValueForField(profile: Record<string, any>, field: string): s
   return String(profile?.[field] || '').trim();
 }
 
-function buildFieldPrompt(field: string, value: string): string {
-  const nice = field.charAt(0).toUpperCase() + field.slice(1);
-  const shown = value?.trim() ? value.trim() : 'not provided';
-  return `Please confirm your ${nice}: ${shown}. Say yes to confirm, or say: change ${field} to <value>.`;
+function buildFieldPrompt(field: string, value: string, language: string): string {
+  const shown = value?.trim() ? value.trim() : '';
+  const langCode = language.split('-')[0];
+
+  const fieldNames: Record<string, Record<string, string>> = {
+    name: { hi: 'नाम', ta: 'பெயர்', te: 'పేరు', kn: 'ಹೆಸರು', mr: 'नाव', en: 'Name' },
+    phone: { hi: 'फोन नंबर', ta: 'தொலைபேசி', te: 'ఫోన్', kn: 'ಫೋನ್', mr: 'फोन नंबर', en: 'Phone' },
+    state: { hi: 'राज्य', ta: 'மாநிலம்', te: 'రాష్ట్రం', kn: 'ರಾಜ್ಯ', mr: 'राज्य', en: 'State' },
+    district: { hi: 'जिला', ta: 'மாவட்டம்', te: 'జిల్లా', kn: 'ಜಿಲ್ಲೆ', mr: 'जिल्हा', en: 'District' },
+    address: { hi: 'पता', ta: 'முகவரி', te: 'చిరునామా', kn: 'ವಿಳಾಸ', mr: 'पत्ता', en: 'Address' },
+  };
+
+  const confirmWords: Record<string, string> = {
+    hi: 'हाँ बोलें अगर सही है',
+    ta: 'சரி என்று சொல்லுங்கள்',
+    te: 'అవును అని చెప్పండి',
+    kn: 'ಹೌದು ಎಂದು ಹೇಳಿ',
+    mr: 'हो म्हणा',
+    en: 'Say yes to confirm',
+  };
+
+  const changeWords: Record<string, string> = {
+    hi: 'या बदलने के लिए बोलें:',
+    ta: 'மாற்ற சொல்லுங்கள்:',
+    te: 'మార్చడానికి చెప్పండి:',
+    kn: 'ಬದಲಾಯಿಸಲು ಹೇಳಿ:',
+    mr: 'बदलायचे असल्यास म्हणा:',
+    en: 'Or say: change to',
+  };
+
+  const notProvided: Record<string, string> = {
+    hi: 'दिया नहीं गया', ta: 'வழங்கப்படவில்லை', te: 'అందించబడలేదు',
+    kn: 'ನೀಡಲಾಗಿಲ್ಲ', mr: 'दिलेले नाही', en: 'not provided',
+  };
+
+  const fName = (fieldNames[field]?.[langCode] || fieldNames[field]?.en || field);
+  const shownVal = shown || (notProvided[langCode] || notProvided.en);
+  const confirmWord = confirmWords[langCode] || confirmWords.en;
+  const changeWord = changeWords[langCode] || changeWords.en;
+
+  return `${fName}: ${shownVal}. ${confirmWord}, ${changeWord} "${field}".`;
 }
 
 function parseFieldChangeCandidate(transcript: string, currentField: string): string | null {

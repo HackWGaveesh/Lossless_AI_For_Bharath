@@ -54,12 +54,14 @@ export interface UseAssistantConversationReturn {
   execution: Record<string, unknown> | null;
   pendingAction: Record<string, unknown> | null;
   setPendingAction: (v: Record<string, unknown> | null) => void;
+  storedConfirmationToken: string | null;
   cards: Array<Record<string, unknown>>;
   groundingSources: string[];
   budgetMode: 'normal' | 'guarded' | 'strict';
   responseMode: string;
   lastPayload: Record<string, unknown> | null;
   sendMessage: (rawText?: string, opts?: { confirmationToken?: string | null }) => Promise<void>;
+  clearSession: () => void;
 }
 
 export function useAssistantConversation(
@@ -82,6 +84,7 @@ export function useAssistantConversation(
   const [loading, setLoading] = useState(false);
   const [execution, setExecution] = useState<Record<string, unknown> | null>(null);
   const [pendingAction, setPendingAction] = useState<Record<string, unknown> | null>(null);
+  const [storedConfirmationToken, setStoredConfirmationToken] = useState<string | null>(null);
   const [cards, setCards] = useState<Array<Record<string, unknown>>>([]);
   const [groundingSources, setGroundingSources] = useState<string[]>([]);
   const [budgetMode, setBudgetMode] = useState<'normal' | 'guarded' | 'strict'>('normal');
@@ -114,6 +117,20 @@ export function useAssistantConversation(
     };
   }, []);
 
+  const clearSession = useCallback(() => {
+    setMessages([]);
+    setPendingAction(null);
+    setStoredConfirmationToken(null);
+    setCards([]);
+    setExecution(null);
+    setGroundingSources([]);
+    setResponseMode('workflow');
+    setLastPayload(null);
+    if (persistMessages) {
+      try { sessionStorage.removeItem(messagesKey); } catch { /* noop */ }
+    }
+  }, [messagesKey, persistMessages]);
+
   const sendMessage = useCallback(
     async (rawText?: string, opts?: { confirmationToken?: string | null }) => {
       const text = (rawText ?? '').trim();
@@ -123,6 +140,18 @@ export function useAssistantConversation(
       const optimisticUser: ChatMessage = { role: 'user', content: text, timestamp: Date.now() };
       setMessages((prev) => [...prev, optimisticUser]);
 
+      // Auto-attach stored token when user voice-confirms a pending application
+      const isVoiceConfirm =
+        /^(yes|haan|haanji|ha|ok|okay|confirm|proceed|seri|avunu|ho|theek hai|bilkul|zaroor|accha|சரி|அவுனு|అవును|సరే|ಹೌದು|ಸರಿ|हां|ठीक है|हो|हाँ)$/i
+          .test(text.trim());
+
+      const effectiveToken: string | undefined =
+        opts?.confirmationToken !== undefined && opts.confirmationToken !== null
+          ? opts.confirmationToken
+          : isVoiceConfirm && pendingAction?.type === 'application_confirm' && storedConfirmationToken
+            ? storedConfirmationToken
+            : undefined;
+
       try {
         const res = await voiceQuery({
           transcript: text,
@@ -131,7 +160,7 @@ export function useAssistantConversation(
           sessionContext: messages.slice(-CONTEXT_TURNS).map((m) => ({ role: m.role, content: m.content })),
           idempotencyKey: `${channel}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           channel,
-          confirmationToken: opts?.confirmationToken ?? undefined,
+          confirmationToken: effectiveToken,
         });
 
         if (!mountedRef.current) return;
@@ -156,7 +185,20 @@ export function useAssistantConversation(
         }
 
         setExecution((payload.execution as Record<string, unknown>) ?? null);
-        setPendingAction((payload.pendingAction ?? payload.pendingConfirmation) as Record<string, unknown> | null ?? null);
+
+        const incomingPending = (payload.pendingAction ?? payload.pendingConfirmation) as Record<string, unknown> | null ?? null;
+        setPendingAction(incomingPending);
+        // Store confirmation token when application_confirm arrives
+        if (
+          incomingPending?.type === 'application_confirm' &&
+          typeof incomingPending.confirmationToken === 'string' &&
+          incomingPending.confirmationToken
+        ) {
+          setStoredConfirmationToken(incomingPending.confirmationToken as string);
+        } else if (!incomingPending) {
+          setStoredConfirmationToken(null); // clear after submission
+        }
+
         setCards((Array.isArray(payload.cards) ? payload.cards : []) as Array<Record<string, unknown>>);
         setGroundingSources(Array.isArray((payload.grounding as { sources?: string[] })?.sources) ? (payload.grounding as { sources: string[] }).sources : []);
         setBudgetMode((payload.budgetMode as 'normal' | 'guarded' | 'strict') ?? 'normal');
@@ -165,8 +207,8 @@ export function useAssistantConversation(
 
         const maybeLang = String(
           (payload.execution as Record<string, unknown>)?.entities &&
-          typeof (payload.execution as Record<string, unknown>).entities === 'object' &&
-          (payload.execution as Record<string, unknown>).entities !== null
+            typeof (payload.execution as Record<string, unknown>).entities === 'object' &&
+            (payload.execution as Record<string, unknown>).entities !== null
             ? ((payload.execution as Record<string, unknown>).entities as Record<string, unknown>).preferredLanguage
             : ''
         ).trim() as SupportedLanguage;
@@ -200,6 +242,8 @@ export function useAssistantConversation(
       errorMessage,
       onLanguageUpdated,
       queryClient,
+      pendingAction,
+      storedConfirmationToken,
     ]
   );
 
@@ -210,12 +254,14 @@ export function useAssistantConversation(
     execution,
     pendingAction,
     setPendingAction,
+    storedConfirmationToken,
     cards,
     groundingSources,
     budgetMode,
     responseMode,
     lastPayload,
     sendMessage,
+    clearSession,
   };
 }
 

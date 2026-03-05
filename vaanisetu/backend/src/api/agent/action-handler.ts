@@ -688,10 +688,29 @@ export async function executeAgentAction(event: any): Promise<Record<string, any
                     if (!ALLOW_LOCAL_DATA_FALLBACK) {
                         throw new Error('DATA_UNAVAILABLE: jobs datasource is currently unavailable');
                     }
+                    logger.info('Falling back to local JSON for jobs');
                     const fs = await import('fs/promises');
                     const path = await import('path');
-                    const raw = await fs.readFile(path.resolve(process.cwd(), '../data/jobs/sample-jobs.json'), 'utf-8');
-                    jobs = JSON.parse(raw).slice(0, 20).map((j: any) => ({
+                    const url = await import('url');
+                    const thisDir = typeof __dirname !== 'undefined'
+                        ? __dirname
+                        : path.dirname(url.fileURLToPath(import.meta.url));
+                    const jobsCandidates = [
+                        path.resolve(thisDir, '../../../../data/jobs/sample-jobs.json'),
+                        path.resolve(thisDir, '../../../data/jobs/sample-jobs.json'),
+                        path.resolve(process.cwd(), 'data/jobs/sample-jobs.json'),
+                        path.resolve(process.cwd(), '../data/jobs/sample-jobs.json'),
+                    ];
+                    let rawJobs = '';
+                    for (const candidate of jobsCandidates) {
+                        try {
+                            rawJobs = await fs.readFile(candidate, 'utf-8');
+                            logger.info('Loaded local jobs from', { path: candidate });
+                            break;
+                        } catch { /* try next */ }
+                    }
+                    if (!rawJobs) throw new Error('DATA_UNAVAILABLE: local jobs fallback file not found');
+                    jobs = JSON.parse(rawJobs).slice(0, 20).map((j: any) => ({
                         id: j.job_id, title: j.title, company: j.company, state: j.state, district: j.district, type: j.job_type,
                         salaryMin: j.salary_min ?? 0, salaryMax: j.salary_max ?? 0, description: j.description ?? '',
                         salaryRange: `Rs ${(j.salary_min ?? 0).toLocaleString('en-IN')} - Rs ${(j.salary_max ?? 0).toLocaleString('en-IN')}/month`,

@@ -43,7 +43,7 @@ export interface JobSummary {
 }
 
 export interface OrchestratorInput {
-  intent: 'schemes' | 'scheme_detail' | 'jobs' | 'apply' | 'status' | 'profile_update' | 'language_update' | 'general';
+  intent: 'schemes' | 'scheme_detail' | 'jobs' | 'apply' | 'status' | 'profile_update' | 'language_update' | 'documents' | 'greeting' | 'general';
   language: string;            // e.g. 'hi-IN', 'ta-IN', 'en-IN'
   transcript: string;
   schemes?: SchemeSummary[];

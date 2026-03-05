@@ -35,12 +35,14 @@ export default function AssistantPage() {
     execution,
     pendingAction,
     setPendingAction,
+    storedConfirmationToken,
     cards,
     groundingSources,
     budgetMode,
     responseMode,
     sendMessage,
     lastPayload,
+    clearSession,
   } = useAssistantConversation({
     langCode,
     channel: 'assistant_page',
@@ -208,6 +210,65 @@ export default function AssistantPage() {
         </div>
       );
     }
+    if (type === 'field_confirm') {
+      return (
+        <div key={`card-${idx}`} className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm">
+          <div className="text-xs text-blue-600 font-medium uppercase tracking-wide mb-1">Confirm Detail</div>
+          <div className="flex items-center justify-between">
+            <span className="text-blue-800 font-medium capitalize">{String(card.field || '')}</span>
+            <span className="text-blue-700 bg-blue-100 px-2 py-0.5 rounded text-sm">
+              {String(card.value || '') || <em className="text-blue-400">not provided</em>}
+            </span>
+          </div>
+          <p className="text-xs text-blue-600 mt-1">
+            Say <strong>&quot;yes&quot;</strong> to confirm or <strong>&quot;change to [new value]&quot;</strong> to update.
+          </p>
+        </div>
+      );
+    }
+    if (type === 'scheme_disambiguation') {
+      const options = Array.isArray(card.options) ? card.options as Array<{ id?: string; code?: string; name?: string; benefitRs?: number }> : [];
+      return (
+        <div key={`card-${idx}`} className="rounded-lg border border-violet-200 bg-violet-50 p-3 text-sm space-y-2">
+          <div className="font-semibold text-violet-800">Multiple schemes found — choose one:</div>
+          {options.map((opt, i) => (
+            <button
+              key={opt.id || opt.code || i}
+              onClick={() => void sendMessage(`apply for ${opt.name || opt.code}`)}
+              className="w-full text-left rounded border border-violet-200 bg-white px-3 py-2 hover:bg-violet-50 transition-colors"
+            >
+              <div className="font-medium text-violet-900">{opt.name || opt.code}</div>
+              {opt.benefitRs ? (
+                <div className="text-xs text-green-700">₹{Number(opt.benefitRs).toLocaleString('en-IN')}</div>
+              ) : null}
+            </button>
+          ))}
+        </div>
+      );
+    }
+    if (type === 'application_confirm') {
+      const scheme = (card.scheme || {}) as Record<string, any>;
+      const missingDocs = Array.isArray(card.missingDocuments) ? card.missingDocuments as string[] : [];
+      return (
+        <div key={`card-${idx}`} className="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-2 text-sm">
+          <div className="font-semibold text-amber-800 flex items-center gap-2">
+            <span>📋</span>
+            <span>Confirm Application</span>
+          </div>
+          <div className="font-medium text-text-primary">{scheme.nameEn || scheme.name || 'Selected scheme'}</div>
+          {typeof scheme.benefitRs === 'number' && scheme.benefitRs > 0 ? (
+            <div className="text-sm">Benefit: <span className="font-semibold text-green-700">₹{Number(scheme.benefitRs).toLocaleString('en-IN')}/year</span></div>
+          ) : null}
+          {missingDocs.length > 0 ? (
+            <div className="text-xs bg-red-50 border border-red-200 rounded-lg p-2 text-red-700">
+              ⚠️ Missing documents: {missingDocs.join(', ')}.{' '}
+              <Link to="/documents" className="underline font-medium">Upload now →</Link>
+            </div>
+          ) : null}
+          <div className="text-xs text-amber-600 italic">Say &quot;Yes&quot;, &quot;Confirm&quot;, or &quot;Haan&quot; by voice to proceed</div>
+        </div>
+      );
+    }
     return null;
   };
 
@@ -298,6 +359,13 @@ export default function AssistantPage() {
                 </div>
               ) : null}
             </div>
+            <button
+              onClick={clearSession}
+              className="text-xs text-text-muted hover:text-text-secondary px-2 py-1 rounded border border-surface-border"
+              title="Clear conversation"
+            >
+              Clear
+            </button>
             <span className="px-2 py-1 rounded-full border border-surface-border bg-surface-bg">{responseMode}</span>
             {budgetMode !== 'normal' ? (
               <span className="px-2 py-1 rounded-full border border-rose-200 bg-rose-50 text-rose-700">Budget: {budgetMode}</span>
@@ -355,26 +423,41 @@ export default function AssistantPage() {
           ) : null}
 
           {pendingAction?.type === 'application_confirm' ? (
-            <div className="rounded-lg border border-surface-border bg-surface-bg p-3">
-              <div className="text-sm font-medium text-text-primary">
-                Confirm application for {pendingSchemeName}?
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-3">
+              <div className="font-semibold text-amber-800 flex items-center gap-2">
+                <span>📋</span>
+                <span>Confirm Application</span>
               </div>
-              {Array.isArray(pendingAction?.missingDocuments) && (pendingAction.missingDocuments as string[]).length > 0 ? (
-                <div className="text-xs text-amber-700 mt-1">
-                  Missing documents: {(pendingAction.missingDocuments as string[]).join(', ')}
+              <div className="text-sm font-medium text-text-primary">{pendingSchemeName}</div>
+              {typeof (pendingAction?.scheme as any)?.benefitRs === 'number' && (
+                <div className="text-sm">
+                  Benefit: <span className="font-semibold text-green-700">
+                    ₹{Number((pendingAction.scheme as any).benefitRs).toLocaleString('en-IN')}/year
+                  </span>
                 </div>
-              ) : null}
-              <div className="mt-2 flex gap-2">
+              )}
+              {Array.isArray(pendingAction?.missingDocuments) && (pendingAction.missingDocuments as string[]).length > 0 && (
+                <div className="text-xs bg-red-50 border border-red-200 rounded-lg p-2 text-red-700">
+                  ⚠️ Missing documents: {(pendingAction.missingDocuments as string[]).join(', ')}.{' '}
+                  <Link to="/documents" className="underline font-medium">Upload now →</Link>
+                </div>
+              )}
+              <div className="text-xs text-amber-600 italic">
+                Say "Yes", "Confirm", or "Haan" by voice to proceed
+              </div>
+              <div className="flex gap-2">
                 <Button
-                  onClick={() => void sendMessage('yes confirm application', { confirmationToken: (pendingAction?.confirmationToken as string) ?? null })}
+                  onClick={() => void sendMessage('yes confirm application', {
+                    confirmationToken: (storedConfirmationToken ?? (pendingAction?.confirmationToken as string)) || undefined,
+                  })}
                 >
-                  Confirm
+                  ✅ Confirm & Submit
                 </Button>
                 <Button
                   variant="outline"
                   onClick={() => setPendingAction(null)}
                 >
-                  Cancel
+                  ✕ Cancel
                 </Button>
               </div>
             </div>
