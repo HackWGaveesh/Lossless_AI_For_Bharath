@@ -10,6 +10,24 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from '../../utils/logger.js';
 import { evaluateEligibility } from '../../services/scheme-eligibility-service.js';
+import { createRequire } from 'module';
+
+// These JSON imports are bundled inline by esbuild — no runtime file I/O needed
+const _require = createRequire(import.meta.url);
+const LOCAL_SCHEMES_DATA: any[] = (() => {
+    try {
+        return _require('../../../../data/schemes/central-schemes.json');
+    } catch {
+        return [];
+    }
+})();
+const LOCAL_JOBS_DATA: any[] = (() => {
+    try {
+        return _require('../../../../data/jobs/sample-jobs.json');
+    } catch {
+        return [];
+    }
+})();
 
 const rds = new RDSDataClient({ region: process.env.REGION || 'ap-south-1' });
 const dynamo = DynamoDBDocumentClient.from(
@@ -206,32 +224,11 @@ async function loadSchemes(): Promise<SchemeLite[]> {
         if (!ALLOW_LOCAL_DATA_FALLBACK) {
             throw new Error('DATA_UNAVAILABLE: schemes datasource is currently unavailable');
         }
-        logger.info('Falling back to local JSON for schemes');
-        const fs = await import('fs/promises');
-        const path = await import('path');
-        const url = await import('url');
-        // Resolve relative to this file's location, not process.cwd() (which is / in Lambda)
-        const thisDir = typeof __dirname !== 'undefined'
-            ? __dirname
-            : path.dirname(url.fileURLToPath(import.meta.url));
-        const candidates = [
-            path.resolve(thisDir, '../../../../data/schemes/central-schemes.json'),
-            path.resolve(thisDir, '../../../data/schemes/central-schemes.json'),
-            path.resolve(process.cwd(), 'data/schemes/central-schemes.json'),
-            path.resolve(process.cwd(), '../data/schemes/central-schemes.json'),
-        ];
-        let raw = '';
-        for (const candidate of candidates) {
-            try {
-                raw = await fs.readFile(candidate, 'utf-8');
-                logger.info('Loaded local schemes from', { path: candidate });
-                break;
-            } catch { /* try next */ }
+        if (!LOCAL_SCHEMES_DATA.length) {
+            throw new Error('DATA_UNAVAILABLE: no local fallback data available');
         }
-        if (!raw) {
-            throw new Error('DATA_UNAVAILABLE: local fallback file not found at any candidate path');
-        }
-        return JSON.parse(raw).map((s: any) => ({
+        logger.info('Falling back to bundled JSON for schemes', { count: LOCAL_SCHEMES_DATA.length });
+        return LOCAL_SCHEMES_DATA.map((s: any) => ({
             id: s.scheme_id,
             code: s.scheme_code ?? s.scheme_id,
             nameEn: s.name_en ?? '',
@@ -688,31 +685,17 @@ export async function executeAgentAction(event: any): Promise<Record<string, any
                     if (!ALLOW_LOCAL_DATA_FALLBACK) {
                         throw new Error('DATA_UNAVAILABLE: jobs datasource is currently unavailable');
                     }
-                    logger.info('Falling back to local JSON for jobs');
-                    const fs = await import('fs/promises');
-                    const path = await import('path');
-                    const url = await import('url');
-                    const thisDir = typeof __dirname !== 'undefined'
-                        ? __dirname
-                        : path.dirname(url.fileURLToPath(import.meta.url));
-                    const jobsCandidates = [
-                        path.resolve(thisDir, '../../../../data/jobs/sample-jobs.json'),
-                        path.resolve(thisDir, '../../../data/jobs/sample-jobs.json'),
-                        path.resolve(process.cwd(), 'data/jobs/sample-jobs.json'),
-                        path.resolve(process.cwd(), '../data/jobs/sample-jobs.json'),
-                    ];
-                    let rawJobs = '';
-                    for (const candidate of jobsCandidates) {
-                        try {
-                            rawJobs = await fs.readFile(candidate, 'utf-8');
-                            logger.info('Loaded local jobs from', { path: candidate });
-                            break;
-                        } catch { /* try next */ }
-                    }
-                    if (!rawJobs) throw new Error('DATA_UNAVAILABLE: local jobs fallback file not found');
-                    jobs = JSON.parse(rawJobs).slice(0, 20).map((j: any) => ({
-                        id: j.job_id, title: j.title, company: j.company, state: j.state, district: j.district, type: j.job_type,
-                        salaryMin: j.salary_min ?? 0, salaryMax: j.salary_max ?? 0, description: j.description ?? '',
+                    logger.info('Falling back to bundled JSON for jobs', { count: LOCAL_JOBS_DATA.length });
+                    jobs = LOCAL_JOBS_DATA.slice(0, 20).map((j: any) => ({
+                        id: j.job_id,
+                        title: j.title,
+                        company: j.company,
+                        state: j.state,
+                        district: j.district ?? '',
+                        type: j.job_type ?? '',
+                        salaryMin: j.salary_min ?? 0,
+                        salaryMax: j.salary_max ?? 0,
+                        description: j.description ?? '',
                         salaryRange: `Rs ${(j.salary_min ?? 0).toLocaleString('en-IN')} - Rs ${(j.salary_max ?? 0).toLocaleString('en-IN')}/month`,
                     }));
                 }

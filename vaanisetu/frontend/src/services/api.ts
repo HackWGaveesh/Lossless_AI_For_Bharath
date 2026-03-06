@@ -5,7 +5,7 @@ const API_BASE = import.meta.env.VITE_API_URL ?? '/api';
 
 export const api = axios.create({
   baseURL: API_BASE,
-  timeout: 30000,
+  timeout: 35000,   // 35s: 29s API GW + 6s client buffer for network latency
   headers: { 'Content-Type': 'application/json' },
 });
 
@@ -151,18 +151,20 @@ export async function createApplication(body: {
   confirmationToken?: string;
   idempotencyKey?: string;
 }) {
-  const { data } = await api.post<{ success: boolean; data: {
-    applicationId?: string;
-    status?: string;
-    needsConfirmation?: boolean;
-    confirmationToken?: string | null;
-    missingDocuments?: string[];
-    schemeId?: string | null;
-    schemeCode?: string | null;
-    schemeName?: string | null;
-    code?: string;
-    message?: string;
-  } }>(
+  const { data } = await api.post<{
+    success: boolean; data: {
+      applicationId?: string;
+      status?: string;
+      needsConfirmation?: boolean;
+      confirmationToken?: string | null;
+      missingDocuments?: string[];
+      schemeId?: string | null;
+      schemeCode?: string | null;
+      schemeName?: string | null;
+      code?: string;
+      message?: string;
+    }
+  }>(
     '/applications',
     body
   );
@@ -180,35 +182,37 @@ export async function voiceQuery(params: {
   forceLanguage?: string;
   confirmationToken?: string;
 }) {
-  const { data } = await api.post<{ success: boolean; data: {
-    responseText: string;
-    language: string;
-    agentUsed?: boolean;
-    responseMode?: 'agent' | 'workflow' | 'direct_model';
-    applicationSubmitted?: boolean;
-    applicationId?: string | null;
-    pendingConfirmation?: {
-      type?: string;
-      confirmationToken?: string | null;
-      scheme?: Record<string, unknown>;
-      options?: Array<{ id?: string; code?: string; name?: string; benefitRs?: number }>;
-      missingDocuments?: string[];
-    } | null;
-    pendingAction?: Record<string, unknown> | null;
-    cards?: Array<Record<string, unknown>>;
-    execution?: {
-      state?: string;
-      intent?: string;
-      confidence?: number;
-      entities?: Record<string, unknown>;
-      steps?: string[];
-    } | null;
-    messages?: Array<{ role: string; content: string; timestamp?: number }>;
-    grounding?: { sources?: string[] };
-    actionResultType?: string | null;
-    budgetMode?: 'normal' | 'guarded' | 'strict';
-    agentTrace?: { actionCalled?: string; agentUsed?: boolean } | null;
-  } }>(
+  const { data } = await api.post<{
+    success: boolean; data: {
+      responseText: string;
+      language: string;
+      agentUsed?: boolean;
+      responseMode?: 'agent' | 'workflow' | 'direct_model';
+      applicationSubmitted?: boolean;
+      applicationId?: string | null;
+      pendingConfirmation?: {
+        type?: string;
+        confirmationToken?: string | null;
+        scheme?: Record<string, unknown>;
+        options?: Array<{ id?: string; code?: string; name?: string; benefitRs?: number }>;
+        missingDocuments?: string[];
+      } | null;
+      pendingAction?: Record<string, unknown> | null;
+      cards?: Array<Record<string, unknown>>;
+      execution?: {
+        state?: string;
+        intent?: string;
+        confidence?: number;
+        entities?: Record<string, unknown>;
+        steps?: string[];
+      } | null;
+      messages?: Array<{ role: string; content: string; timestamp?: number }>;
+      grounding?: { sources?: string[] };
+      actionResultType?: string | null;
+      budgetMode?: 'normal' | 'guarded' | 'strict';
+      agentTrace?: { actionCalled?: string; agentUsed?: boolean } | null;
+    }
+  }>(
     '/voice/query',
     params,
     { timeout: 60000 }

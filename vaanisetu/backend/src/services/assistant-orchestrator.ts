@@ -1080,7 +1080,20 @@ async function maybeHandleStructuredWorkflow(args: {
     || /ಹೌದು|ಸರಿ|ಓಕೆ/.test(transcript)
     || /हो|ठीक है|हाँ|बिल्कुल/.test(transcript);
   const confirmConfidence = confirmIntentConfidence(normalized);
-  if (intent !== 'apply') return null;
+
+  // Override intent to 'apply' when:
+  // (a) user expresses confirmation AND
+  // (b) there is an active pending application confirmation in the session OR a confirmationToken in the request
+  const hasPendingForOverride =
+    isConfirmIntent &&
+    (
+      sessionPendingConfirmation?.type === 'application_confirm' ||
+      sessionPendingConfirmation?.type === 'apply_field_confirmation' ||
+      !!confirmationToken
+    );
+  const effectiveIntent = hasPendingForOverride ? 'apply' : intent;
+
+  if (effectiveIntent !== 'apply') return null;
 
   const explicitFromTurn = extractSchemeHintFromTranscript(transcript);
   const fromContext = extractPendingSchemeFromContext(sessionContext);

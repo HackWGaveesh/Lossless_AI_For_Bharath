@@ -186,6 +186,22 @@ export class VaaniSetuStack extends cdk.Stack {
       actions: ['transcribe:StartTranscriptionJob', 'transcribe:GetTranscriptionJob'],
       resources: ['*'],
     }));
+    lambdaExecutionRole.addToPolicy(new iam.PolicyStatement({
+      actions: [
+        'rekognition:DetectLabels',
+        'rekognition:DetectFaces',
+        'rekognition:DetectText',
+        'rekognition:CompareFaces',
+        'rekognition:IndexFaces',
+        'rekognition:SearchFacesByImage',
+      ],
+      resources: ['*'],
+    }));
+    lambdaExecutionRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [`arn:aws:secretsmanager:${this.region}:${this.account}:secret:*`],
+    }));
+    kmsKey.grantEncryptDecrypt(lambdaExecutionRole);
     usersTable.grantReadWriteData(lambdaExecutionRole);
     sessionsTable.grantReadWriteData(lambdaExecutionRole);
     runtimeConfigTable.grantReadWriteData(lambdaExecutionRole);
@@ -553,11 +569,12 @@ exports.handler = async (event) => {
         BEDROCK_GUARDRAIL_ID: process.env.BEDROCK_GUARDRAIL_ID || '',
         DOCUMENTS_TABLE: documentsTable.tableName,
         BEDROCK_AGENT_ENABLE_TRACE: 'true',
-        BEDROCK_AGENT_TIMEOUT_MS: '55000',
+        BEDROCK_AGENT_TIMEOUT_MS: '24000',
         BEDROCK_AGENT_FALLBACK_ALIAS_ID: process.env.BEDROCK_AGENT_FALLBACK_ALIAS_ID || '',
         BEDROCK_GUARDRAIL_VERSION: process.env.BEDROCK_GUARDRAIL_VERSION || 'DRAFT',
         APPLICATION_CONFIRMATION_SECRET: process.env.APPLICATION_CONFIRMATION_SECRET || 'vaanisetu-prod-secret-change-me',
         SESSION_TTL_SECONDS: '3600',
+        ALLOW_LOCAL_DATA_FALLBACK: 'true',
       },
     });
     const voiceTranscribeFn = new lambdaNode.NodejsFunction(this, 'VoiceTranscribeFunction', {
@@ -573,7 +590,9 @@ exports.handler = async (event) => {
     });
     const voiceBaseResource = api.root.addResource('voice');
     const voiceResource = voiceBaseResource.addResource('query');
-    voiceResource.addMethod('POST', new apigateway.LambdaIntegration(voiceQueryFn));
+    voiceResource.addMethod('POST', new apigateway.LambdaIntegration(voiceQueryFn, {
+      timeout: cdk.Duration.seconds(29),
+    }));
     voiceBaseResource.addResource('transcribe').addMethod('POST', new apigateway.LambdaIntegration(voiceTranscribeFn));
 
     const jobsListFn = new lambdaNode.NodejsFunction(this, 'JobsListFunction', {
@@ -752,6 +771,7 @@ exports.handler = async (event) => {
       environment: {
         ...nodeOptions.environment,
         DOCUMENTS_TABLE: documentsTable.tableName,
+        ALLOW_LOCAL_DATA_FALLBACK: 'true',
       },
       bundling: { externalModules: ['@aws-sdk/*'], minify: true },
     });
