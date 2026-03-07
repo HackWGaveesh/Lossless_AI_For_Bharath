@@ -1,8 +1,8 @@
-import { Fragment, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Button from '../Common/Button';
 import { SkeletonCard } from '../Common/Skeleton';
-import { searchSchemes, updateProfile } from '../../services/api';
+import { fetchProfile, searchSchemes, updateProfile } from '../../services/api';
 import type { Scheme } from '../../services/api';
 import { useLanguage } from '../../contexts/LanguageContext';
 
@@ -13,22 +13,18 @@ const INDIAN_STATES = [
   'Tripura', 'Uttar Pradesh', 'Uttarakhand', 'West Bengal',
 ];
 
+const CASTE_OPTIONS = ['General', 'OBC', 'SC', 'ST', 'EWS'];
+const OCCUPATIONS = ['farmer', 'agricultural_laborer', 'self_employed', 'student', 'salaried', 'unemployed', 'homemaker'] as const;
+
 export interface EligibilityFormData {
   age?: number;
   gender?: string;
   state?: string;
   district?: string;
   annualIncome?: number;
-  bplCardHolder?: boolean;
-  landOwnership?: string;
-  hasBankAccount?: boolean;
   casteCategory?: string;
-  disabilityStatus?: string;
-  isWidowWidower?: boolean;
-  isMinority?: boolean;
   occupation?: string;
-  farmingType?: string;
-  studentLevel?: string;
+  bplCardholder?: boolean;
 }
 
 const initialForm: EligibilityFormData = {};
@@ -40,47 +36,114 @@ function toUserProfile(form: EligibilityFormData): Record<string, unknown> {
     state: form.state,
     district: form.district,
     annualIncome: form.annualIncome,
-    bplCardHolder: form.bplCardHolder,
-    landOwnership: form.landOwnership,
-    hasBankAccount: form.hasBankAccount,
     casteCategory: form.casteCategory,
-    disabilityStatus: form.disabilityStatus,
-    isWidowWidower: form.isWidowWidower,
-    isMinority: form.isMinority,
     occupation: form.occupation,
-    farmingType: form.farmingType,
-    studentLevel: form.studentLevel,
+    bplCardholder: form.bplCardholder,
   };
+}
+
+function mergeProfileIntoForm(current: EligibilityFormData, profile: EligibilityFormData): EligibilityFormData {
+  const next = { ...current };
+  (Object.keys(profile) as Array<keyof EligibilityFormData>).forEach((key) => {
+    const currentValue = next[key];
+    const profileValue = profile[key];
+    if (
+      (currentValue === undefined || currentValue === '' || currentValue === null)
+      && profileValue !== undefined
+      && profileValue !== ''
+      && profileValue !== null
+    ) {
+      (next as Record<keyof EligibilityFormData, EligibilityFormData[keyof EligibilityFormData] | undefined>)[key] = profileValue;
+    }
+  });
+  return next;
+}
+
+function countFilledFields(form: EligibilityFormData) {
+  return Object.values(form).filter((value) => value !== undefined && value !== '' && value !== null).length;
 }
 
 export default function EligibilityCalculator() {
   const navigate = useNavigate();
   const { t } = useLanguage();
-  const [step, setStep] = useState(1);
   const [form, setForm] = useState<EligibilityFormData>(initialForm);
   const [loading, setLoading] = useState(false);
+  const [profileLoading, setProfileLoading] = useState(true);
   const [results, setResults] = useState<(Scheme & { eligibilityScore?: number })[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showOptional, setShowOptional] = useState(false);
+  const [prefilledCount, setPrefilledCount] = useState(0);
 
-  const update = (key: keyof EligibilityFormData, value: unknown) => {
-    setForm((p) => ({ ...p, [key]: value }));
+  useEffect(() => {
+    let active = true;
+
+    fetchProfile()
+      .then((res) => {
+        if (!active) return;
+        const profile = (res?.data?.profile ?? {}) as Record<string, unknown>;
+        const prefill: EligibilityFormData = {
+          age: typeof profile.age === 'number' ? profile.age : undefined,
+          gender: typeof profile.gender === 'string' ? profile.gender : undefined,
+          state: typeof profile.state === 'string' ? profile.state : undefined,
+          district: typeof profile.district === 'string' ? profile.district : undefined,
+          annualIncome: typeof profile.annualIncome === 'number'
+            ? profile.annualIncome
+            : typeof profile.annual_income === 'number'
+              ? Number(profile.annual_income)
+              : undefined,
+          casteCategory: typeof profile.casteCategory === 'string'
+            ? profile.casteCategory
+            : typeof profile.caste_category === 'string'
+              ? profile.caste_category
+              : undefined,
+          occupation: typeof profile.occupation === 'string' ? profile.occupation : undefined,
+          bplCardholder: typeof profile.bplCardholder === 'boolean'
+            ? profile.bplCardholder
+            : typeof profile.bpl_cardholder === 'boolean'
+              ? profile.bpl_cardholder
+              : undefined,
+        };
+
+        setPrefilledCount(countFilledFields(prefill));
+        setForm((current) => mergeProfileIntoForm(current, prefill));
+        if (prefill.district || prefill.casteCategory || prefill.occupation || prefill.bplCardholder !== undefined) {
+          setShowOptional(true);
+        }
+      })
+      .catch(() => {
+        if (active) setPrefilledCount(0);
+      })
+      .finally(() => {
+        if (active) setProfileLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const update = (key: keyof EligibilityFormData, value: EligibilityFormData[keyof EligibilityFormData]) => {
+    setForm((previous) => ({ ...previous, [key]: value }));
     setError(null);
   };
 
-  const canProceedStep1 = form.age != null && form.age >= 18 && form.age <= 80 && form.gender && form.state && form.district;
-  const canProceedStep2 = form.annualIncome != null && form.hasBankAccount != null;
-  const canProceedStep3 = true;
-  const canProceedStep4 = !!form.occupation;
+  const canSubmit = useMemo(() => (
+    form.age != null
+    && form.age >= 18
+    && form.age <= 120
+    && !!form.gender
+    && !!form.state
+    && form.annualIncome != null
+  ), [form.age, form.annualIncome, form.gender, form.state]);
 
   const handleSubmit = async () => {
     setLoading(true);
     setError(null);
     try {
-      const profile = toUserProfile(form);
-      const res = await searchSchemes(profile, '');
+      const res = await searchSchemes(toUserProfile(form), '');
       const schemes = (res?.data?.schemes ?? []) as (Scheme & { eligibilityScore?: number })[];
       setResults(schemes);
-    } catch (e) {
+    } catch {
       setError(t('common.error'));
     } finally {
       setLoading(false);
@@ -97,23 +160,6 @@ export default function EligibilityCalculator() {
       setLoading(false);
     }
   };
-
-  const stepDots = (
-    <div className="flex items-center justify-center gap-2 mb-8">
-      {[1, 2, 3, 4].map((s) => (
-        <Fragment key={s}>
-          <div
-            className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium border-2 transition-colors ${
-              step > s ? 'bg-accent-500 border-accent-500 text-white' : step === s ? 'bg-primary-500 border-primary-500 text-white' : 'border-surface-border bg-surface-card text-text-muted'
-            }`}
-          >
-            {step > s ? '✓' : s}
-          </div>
-          {s < 4 && <div className={`w-8 h-0.5 ${step > s ? 'bg-accent-500' : 'bg-surface-border'}`} />}
-        </Fragment>
-      ))}
-    </div>
-  );
 
   if (results !== null && !loading) {
     return (
@@ -132,30 +178,30 @@ export default function EligibilityCalculator() {
                   <span className="text-xs font-medium px-2 py-1 rounded-full bg-secondary-100 text-secondary-700">
                     {scheme.category ?? 'Scheme'}
                   </span>
-                  {scheme.eligibilityScore != null && (
+                  {scheme.eligibilityScore != null ? (
                     <span className="text-sm font-semibold text-primary-500">
                       {Math.round(scheme.eligibilityScore)}% Match
                     </span>
-                  )}
+                  ) : null}
                 </div>
                 <h4 className="font-display font-semibold text-text-primary">{scheme.nameEn ?? scheme.schemeId}</h4>
-                {scheme.nameHi && <p className="text-sm text-text-secondary">{scheme.nameHi}</p>}
-                {(scheme.benefitAmountMin != null || scheme.benefitAmountMax != null) && (
+                {scheme.nameHi ? <p className="text-sm text-text-secondary">{scheme.nameHi}</p> : null}
+                {(scheme.benefitAmountMin != null || scheme.benefitAmountMax != null) ? (
                   <p className="text-sm text-primary-600 font-medium mt-1">
-                    ₹{scheme.benefitAmountMin ?? 0} – ₹{scheme.benefitAmountMax ?? 0}
+                    Rs {scheme.benefitAmountMin ?? 0} - Rs {scheme.benefitAmountMax ?? 0}
                   </p>
-                )}
+                ) : null}
                 <div className="mt-3 flex gap-2">
-                <Button size="sm" onClick={() => navigate(`/schemes/${scheme.schemeId}`)}>
-                  {t('schemes.view_details')} & {t('schemes.apply_now')}
-                </Button>
+                  <Button size="sm" onClick={() => navigate(`/schemes/${scheme.schemeId}`)}>
+                    {t('schemes.view_details')} & {t('schemes.apply_now')}
+                  </Button>
                 </div>
               </div>
             ))
           )}
         </div>
         <div className="flex flex-wrap gap-3">
-          <Button variant="outline" onClick={() => { setResults(null); setStep(1); }}>
+          <Button variant="outline" onClick={() => setResults(null)}>
             {t('eligibility.refine')}
           </Button>
           <Button variant="secondary" onClick={handleSaveProfile} disabled={loading}>
@@ -168,289 +214,183 @@ export default function EligibilityCalculator() {
 
   return (
     <div className="bg-surface-card border border-surface-border rounded-card p-6 shadow-card">
-      <h3 className="font-display text-xl font-semibold text-text-primary mb-2">{t('schemes.find_for_you')}</h3>
-      <p className="text-sm text-text-secondary mb-6">{t('eligibility.subtitle')}</p>
-
-      {stepDots}
-
-      {step === 1 && (
-        <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-1">Age (18–80)</label>
-            <input
-              type="number"
-              min={18}
-              max={80}
-              value={form.age ?? ''}
-              onChange={(e) => update('age', e.target.value ? parseInt(e.target.value, 10) : undefined)}
-              className="w-full rounded-lg border border-surface-border bg-surface-bg px-4 py-2 text-text-primary focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-            />
+      <div className="flex flex-wrap items-start justify-between gap-4 mb-6">
+        <div>
+          <h3 className="font-display text-xl font-semibold text-text-primary mb-2">{t('schemes.find_for_you')}</h3>
+          <p className="text-sm text-text-secondary">
+            4 key questions are required. You can add up to 4 more filters if you want tighter matches.
+          </p>
+        </div>
+        <div className="rounded-2xl border border-primary-200 bg-primary-50 px-4 py-3 min-w-[220px]">
+          <div className="text-[11px] uppercase tracking-[0.18em] text-primary-700 font-semibold">Profile Assist</div>
+          <div className="text-2xl font-display font-semibold text-primary-800">
+            {profileLoading ? '...' : prefilledCount}
           </div>
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-2">Gender</label>
-            <div className="flex gap-2 flex-wrap">
-              {['M', 'F', 'Other'].map((g) => (
-                <button
-                  key={g}
-                  type="button"
-                  onClick={() => update('gender', g)}
-                  className={`px-4 py-2 rounded-full text-sm font-medium border-2 transition-colors ${
-                    form.gender === g ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-surface-border bg-surface-card text-text-secondary hover:border-primary-300'
-                  }`}
-                >
-                  {g}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-1">State</label>
-            <select
-              value={form.state ?? ''}
-              onChange={(e) => update('state', e.target.value || undefined)}
-              className="w-full rounded-lg border border-surface-border bg-surface-bg px-4 py-2 text-text-primary"
-            >
-              <option value="">Select state</option>
-              {INDIAN_STATES.map((s) => (
-                <option key={s} value={s}>{s}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-1">District</label>
-            <input
-              type="text"
-              value={form.district ?? ''}
-              onChange={(e) => update('district', e.target.value || undefined)}
-              className="w-full rounded-lg border border-surface-border bg-surface-bg px-4 py-2 text-text-primary"
-              placeholder="District"
-            />
+          <div className="text-xs text-primary-700">
+            {profileLoading ? 'Checking your saved profile...' : 'answers filled from saved profile'}
           </div>
         </div>
-      )}
+      </div>
 
-      {step === 2 && (
-        <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-1">Annual family income (₹)</label>
-            <input
-              type="number"
-              min={0}
-              value={form.annualIncome ?? ''}
-              onChange={(e) => update('annualIncome', e.target.value ? parseInt(e.target.value, 10) : undefined)}
-              className="w-full rounded-lg border border-surface-border bg-surface-bg px-4 py-2 text-text-primary"
-              placeholder="e.g. 150000"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-2">BPL card holder?</label>
-            <div className="flex gap-2">
-              {[true, false].map((v) => (
-                <button
-                  key={String(v)}
-                  type="button"
-                  onClick={() => update('bplCardHolder', v)}
-                  className={`px-4 py-2 rounded-full text-sm font-medium border-2 ${
-                    form.bplCardHolder === v ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-surface-border'
-                  }`}
-                >
-                  {v ? 'Yes' : 'No'}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-2">Land ownership</label>
-            <div className="flex flex-wrap gap-2">
-              {['None', 'Less than 2 hectares', '2-5 hectares', 'More than 5 hectares'].map((opt) => (
-                <button
-                  key={opt}
-                  type="button"
-                  onClick={() => update('landOwnership', opt)}
-                  className={`px-3 py-2 rounded-full text-sm border-2 ${
-                    form.landOwnership === opt ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-surface-border'
-                  }`}
-                >
-                  {opt}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-2">Owns a bank account?</label>
-            <div className="flex gap-2">
-              {[true, false].map((v) => (
-                <button
-                  key={String(v)}
-                  type="button"
-                  onClick={() => update('hasBankAccount', v)}
-                  className={`px-4 py-2 rounded-full text-sm font-medium border-2 ${
-                    form.hasBankAccount === v ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-surface-border'
-                  }`}
-                >
-                  {v ? 'Yes' : 'No'}
-                </button>
-              ))}
-            </div>
+      <div className="grid gap-4 md:grid-cols-2">
+        <div>
+          <label className="block text-sm font-medium text-text-primary mb-1">{t('eligibility.age')}</label>
+          <input
+            type="number"
+            min={18}
+            max={120}
+            value={form.age ?? ''}
+            onChange={(e) => update('age', e.target.value ? parseInt(e.target.value, 10) : undefined)}
+            className="w-full rounded-lg border border-surface-border bg-surface-bg px-4 py-2 text-text-primary focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-text-primary mb-2">{t('eligibility.gender')}</label>
+          <div className="flex gap-2 flex-wrap">
+            {['M', 'F', 'Other'].map((g) => (
+              <button
+                key={g}
+                type="button"
+                onClick={() => update('gender', g)}
+                className={`px-4 py-2 rounded-full text-sm font-medium border-2 transition-colors ${
+                  form.gender === g ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-surface-border bg-surface-card text-text-secondary hover:border-primary-300'
+                }`}
+              >
+                {g}
+              </button>
+            ))}
           </div>
         </div>
-      )}
 
-      {step === 3 && (
-        <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-2">Caste category</label>
-            <div className="flex flex-wrap gap-2">
-              {['General', 'OBC', 'SC', 'ST', 'EWS'].map((c) => (
-                <button
-                  key={c}
-                  type="button"
-                  onClick={() => update('casteCategory', c)}
-                  className={`px-3 py-2 rounded-full text-sm border-2 ${
-                    form.casteCategory === c ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-surface-border'
-                  }`}
-                >
-                  {c}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-2">Disability status</label>
-            <div className="flex flex-wrap gap-2">
-              {['None', 'Physically Disabled', 'Visually Impaired', 'Hearing Impaired'].map((d) => (
-                <button
-                  key={d}
-                  type="button"
-                  onClick={() => update('disabilityStatus', d)}
-                  className={`px-3 py-2 rounded-full text-sm border-2 ${
-                    form.disabilityStatus === d ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-surface-border'
-                  }`}
-                >
-                  {d}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-2">Widow / Widower?</label>
-            <div className="flex gap-2">
-              {[true, false].map((v) => (
-                <button
-                  key={String(v)}
-                  type="button"
-                  onClick={() => update('isWidowWidower', v)}
-                  className={`px-4 py-2 rounded-full text-sm border-2 ${
-                    form.isWidowWidower === v ? 'border-primary-500 bg-primary-50' : 'border-surface-border'
-                  }`}
-                >
-                  {v ? 'Yes' : 'No'}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-2">Minority?</label>
-            <div className="flex gap-2">
-              {[true, false].map((v) => (
-                <button
-                  key={String(v)}
-                  type="button"
-                  onClick={() => update('isMinority', v)}
-                  className={`px-4 py-2 rounded-full text-sm border-2 ${
-                    form.isMinority === v ? 'border-primary-500 bg-primary-50' : 'border-surface-border'
-                  }`}
-                >
-                  {v ? 'Yes' : 'No'}
-                </button>
-              ))}
-            </div>
-          </div>
+        <div>
+          <label className="block text-sm font-medium text-text-primary mb-1">{t('eligibility.state')}</label>
+          <select
+            value={form.state ?? ''}
+            onChange={(e) => update('state', e.target.value || undefined)}
+            className="w-full rounded-lg border border-surface-border bg-surface-bg px-4 py-2 text-text-primary"
+          >
+            <option value="">Select state</option>
+            {INDIAN_STATES.map((state) => (
+              <option key={state} value={state}>{state}</option>
+            ))}
+          </select>
         </div>
-      )}
 
-      {step === 4 && (
-        <div className="space-y-4">
+        <div>
+          <label className="block text-sm font-medium text-text-primary mb-1">{t('eligibility.income')}</label>
+          <input
+            type="number"
+            min={0}
+            value={form.annualIncome ?? ''}
+            onChange={(e) => update('annualIncome', e.target.value ? parseInt(e.target.value, 10) : undefined)}
+            className="w-full rounded-lg border border-surface-border bg-surface-bg px-4 py-2 text-text-primary"
+            placeholder="e.g. 150000"
+          />
+        </div>
+      </div>
+
+      <div className="mt-5 rounded-2xl border border-surface-border bg-surface-elevated p-4">
+        <div className="flex items-center justify-between gap-3">
           <div>
-            <label className="block text-sm font-medium text-text-primary mb-2">Primary occupation</label>
-            <div className="flex flex-wrap gap-2">
-              {['Farmer', 'Agricultural Laborer', 'Self-employed', 'Salaried', 'Student', 'Unemployed', 'Homemaker'].map((o) => (
-                <button
-                  key={o}
-                  type="button"
-                  onClick={() => update('occupation', o.toLowerCase().replace(/\s+/g, '_'))}
-                  className={`px-3 py-2 rounded-full text-sm border-2 ${
-                    form.occupation === o.toLowerCase().replace(/\s+/g, '_') ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-surface-border'
-                  }`}
-                >
-                  {o}
-                </button>
-              ))}
-            </div>
+            <div className="text-sm font-semibold text-text-primary">Optional filters</div>
+            <div className="text-xs text-text-muted">District, caste, occupation, and BPL can improve ranking, but they are not mandatory.</div>
           </div>
-          {form.occupation === 'farmer' && (
+          <button
+            type="button"
+            onClick={() => setShowOptional((value) => !value)}
+            className="text-sm font-medium text-primary-600"
+          >
+            {showOptional ? 'Hide extra filters' : 'Add more filters'}
+          </button>
+        </div>
+
+        {showOptional ? (
+          <div className="grid gap-4 md:grid-cols-2 mt-4">
             <div>
-              <label className="block text-sm font-medium text-text-primary mb-2">Type of farming</label>
+              <label className="block text-sm font-medium text-text-primary mb-1">{t('eligibility.district')}</label>
+              <input
+                type="text"
+                value={form.district ?? ''}
+                onChange={(e) => update('district', e.target.value || undefined)}
+                className="w-full rounded-lg border border-surface-border bg-surface-bg px-4 py-2 text-text-primary"
+                placeholder="District"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-2">{t('eligibility.caste')}</label>
               <div className="flex flex-wrap gap-2">
-                {['Subsistence', 'Commercial', 'Animal husbandry'].map((f) => (
+                {CASTE_OPTIONS.map((caste) => (
                   <button
-                    key={f}
+                    key={caste}
                     type="button"
-                    onClick={() => update('farmingType', f)}
+                    onClick={() => update('casteCategory', caste)}
                     className={`px-3 py-2 rounded-full text-sm border-2 ${
-                      form.farmingType === f ? 'border-primary-500 bg-primary-50' : 'border-surface-border'
+                      form.casteCategory === caste ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-surface-border'
                     }`}
                   >
-                    {f}
+                    {caste}
                   </button>
                 ))}
               </div>
             </div>
-          )}
-          {form.occupation === 'student' && (
+
             <div>
-              <label className="block text-sm font-medium text-text-primary mb-2">Current level</label>
+              <label className="block text-sm font-medium text-text-primary mb-2">{t('eligibility.occupation')}</label>
               <div className="flex flex-wrap gap-2">
-                {['School', 'Undergraduate', 'Postgraduate'].map((l) => (
+                {OCCUPATIONS.map((occupation) => (
                   <button
-                    key={l}
+                    key={occupation}
                     type="button"
-                    onClick={() => update('studentLevel', l)}
+                    onClick={() => update('occupation', occupation)}
                     className={`px-3 py-2 rounded-full text-sm border-2 ${
-                      form.studentLevel === l ? 'border-primary-500 bg-primary-50' : 'border-surface-border'
+                      form.occupation === occupation ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-surface-border'
                     }`}
                   >
-                    {l}
+                    {t(`eligibility.${occupation}`)}
                   </button>
                 ))}
               </div>
             </div>
-          )}
-        </div>
-      )}
 
-      {loading && (
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-2">{t('eligibility.bpl')}</label>
+              <div className="flex gap-2">
+                {[true, false].map((value) => (
+                  <button
+                    key={String(value)}
+                    type="button"
+                    onClick={() => update('bplCardholder', value)}
+                    className={`px-4 py-2 rounded-full text-sm border-2 ${
+                      form.bplCardholder === value ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-surface-border'
+                    }`}
+                  >
+                    {value ? t('eligibility.yes') : t('eligibility.no')}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </div>
+
+      {loading ? (
         <div className="grid gap-4 md:grid-cols-3 mt-6">
-          <SkeletonCard /><SkeletonCard /><SkeletonCard />
+          <SkeletonCard />
+          <SkeletonCard />
+          <SkeletonCard />
         </div>
-      )}
-      {error && <p className="text-red-700 text-sm mt-2">{error}</p>}
+      ) : null}
+      {error ? <p className="text-red-700 text-sm mt-3">{error}</p> : null}
 
-      <div className="flex justify-between mt-8">
-        <Button variant="outline" onClick={() => setStep((s) => Math.max(1, s - 1))} disabled={step === 1}>
-          {t('eligibility.previous')}
+      <div className="flex flex-wrap items-center justify-between gap-3 mt-8">
+        <div className="text-sm text-text-muted">
+          Search works with the 4 core questions. Optional filters only improve ranking.
+        </div>
+        <Button onClick={handleSubmit} disabled={loading || !canSubmit}>
+          {t('eligibility.calculate')}
         </Button>
-        {step < 4 ? (
-          <Button onClick={() => setStep((s) => s + 1)} disabled={
-            (step === 1 && !canProceedStep1) || (step === 2 && !canProceedStep2) || (step === 3 && !canProceedStep3) || (step === 4 && !canProceedStep4)
-          }>
-            {t('eligibility.next')}
-          </Button>
-        ) : (
-          <Button onClick={handleSubmit} disabled={loading || !canProceedStep4}>
-            {t('eligibility.calculate')}
-          </Button>
-        )}
       </div>
     </div>
   );

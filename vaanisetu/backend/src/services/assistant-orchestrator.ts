@@ -286,6 +286,9 @@ async function maybeHandleStructuredWorkflow(args: {
   const normalized = normalizeText(transcript);
 
   // ── Auto-detect language from transcript script ─────────────────────────
+  // Only override the stored language preference when the user actually types in a non-Latin script
+  // (Devanagari, Tamil, Telugu, Kannada). If they type in English but have e.g. Hindi set as their
+  // language, we keep their stored preference so the response comes back in their chosen language.
   const detectedLangHint = detectLanguageHint(transcript);
   const effectiveLanguage = detectedLangHint
     ? `${detectedLangHint}-IN`
@@ -306,6 +309,17 @@ async function maybeHandleStructuredWorkflow(args: {
   ) {
     intent = 'apply';
   }
+  if (
+    intent === 'none'
+    && sessionPendingConfirmation?.type === 'job_confirm'
+    && (/\b(yes|confirm|haan|haanji|proceed|ho|theek hai|bilkul|zaroor|accha|seri|avunu)\b/.test(normalized)
+      || /சரி|அவுனு|ஆமாம்/.test(transcript)
+      || /అవును|సరే|ఓకే/.test(transcript)
+      || /ಹೌದು|ಸರಿ|ಓಕೆ/.test(transcript)
+      || /हो|ठीक है|हाँ|बिल्कुल/.test(transcript))
+  ) {
+    intent = 'apply';
+  }
   if (intent === 'none') {
     const patch = parseProfilePatchFromTranscript(transcript);
     if (Object.keys(patch).length > 0) {
@@ -317,13 +331,14 @@ async function maybeHandleStructuredWorkflow(args: {
           modelId: MODEL_ID,
           messages: [{
             role: 'user',
-            content: [{ text: `Classify this message into exactly one word from: schemes, apply, status, jobs, documents, profile, other\nMessage: "${transcript.slice(0, 200)}"\nReply with ONE word only, no punctuation.` }],
+            content: [{ text: `Classify this message into exactly one word from: schemes, apply, apply_for_job, status, jobs, documents, profile, other\nMessage: "${transcript.slice(0, 200)}"\nReply with ONE word only, no punctuation.` }],
           }],
           inferenceConfig: { maxTokens: 5, temperature: 0 },
         }));
         const cls = (classifyRes.output?.message?.content?.[0]?.text || '').trim().toLowerCase();
         if (cls === 'schemes') intent = 'schemes';
         else if (cls === 'apply') intent = 'apply';
+        else if (cls === 'apply_for_job') intent = 'apply_for_job';
         else if (cls === 'status') intent = 'status';
         else if (cls === 'jobs') intent = 'jobs';
         else if (cls === 'documents') intent = 'documents';
@@ -346,8 +361,16 @@ async function maybeHandleStructuredWorkflow(args: {
       English: 'Hello! I\'m VaaniSetu. I can help with schemes, jobs, and applications. What would you like to know?',
     };
     const fallbackText = greetingFallbacks[langLabel] || greetingFallbacks.English;
+
+    // Proactive context: if there's a pending application confirmation, mention it.
+    let proactivityContext = 'User is greeting you. Respond warmly and briefly list what you can help with.';
+    if (sessionPendingConfirmation?.type === 'application_confirm') {
+      const schemeName = (sessionPendingConfirmation.scheme as any)?.nameEn || (sessionPendingConfirmation.scheme as any)?.name || 'the scheme';
+      proactivityContext += ` Notice that there is a pending application for ${schemeName}. Briefly ask if they want to continue with that or do something else.`;
+    }
+
     const orchestrated = await safeGenerateResponse(
-      { intent: 'general', language: effectiveLanguage, transcript, additionalContext: 'User is greeting you. Respond warmly and briefly list what you can help with.' },
+      { intent: 'general', language: effectiveLanguage, transcript, additionalContext: proactivityContext },
       fallbackText,
     );
     return {
@@ -892,6 +915,19 @@ async function maybeHandleStructuredWorkflow(args: {
         },
       };
     }
+    const summaryRes = await runAction('getUserApplicationsSummary', [{ name: 'userId', value: userId }]);
+    const appliedJobIds = new Set(
+      (summaryRes?.applications || []).filter((a: any) => a.jobId).map((a: any) => String(a.jobId)),
+    );
+    jobs = jobs.filter((j: any) => !appliedJobIds.has(String(j.id)));
+    if (!jobs.length) {
+      return {
+        actionCalled: 'getJobsByProfile',
+        responseText: "You've already applied to all the jobs we found for you. Check your Applications page or try again later for new listings.",
+        actionResultType: 'jobs_all_applied',
+        execution: { intent, confidence: 0.9, steps: ['getJobsByProfile', 'getUserApplicationsSummary'] },
+      };
+    }
     const lines = jobs.map((j: any, i: number) =>
       `${i + 1}. ${j.title} - ${j.company} (${j.state}) ${j.salaryRange ? `- ${j.salaryRange}` : ''}`.trim(),
     );
@@ -911,17 +947,26 @@ async function maybeHandleStructuredWorkflow(args: {
       },
       fallback,
     );
+    const jobsForContext = jobs.slice(0, 5).map((j: any) => ({
+      id: j.id,
+      title: j.title,
+      company: j.company,
+      state: j.state,
+      salaryRange: j.salaryRange,
+    }));
     return {
       actionCalled: 'getJobsByProfile',
       responseText: orchestrated.responseText || fallback,
       actionResultType: 'jobs',
       cards: jobs.slice(0, 3).map((j: any) => ({
         type: 'job_card',
+        jobId: j.id,
         title: j.title,
         company: j.company,
         state: j.state,
         salaryRange: j.salaryRange,
       })),
+      pendingConfirmation: { type: 'job_list', jobs: jobsForContext },
       grounding: { sources: ['jobs_table'] },
       serviceTrace: orchestrated.serviceTrace,
       execution: {
@@ -1089,21 +1134,216 @@ async function maybeHandleStructuredWorkflow(args: {
     (
       sessionPendingConfirmation?.type === 'application_confirm' ||
       sessionPendingConfirmation?.type === 'apply_field_confirmation' ||
+      sessionPendingConfirmation?.type === 'job_confirm' ||
       !!confirmationToken
     );
   const effectiveIntent = hasPendingForOverride ? 'apply' : intent;
 
-  if (effectiveIntent !== 'apply') return null;
+  if (effectiveIntent !== 'apply' && effectiveIntent !== 'apply_for_job') return null;
+
+  const jobListContext = sessionPendingConfirmation?.type === 'job_list' ? sessionPendingConfirmation : null;
+  const jobConfirmContext = sessionPendingConfirmation?.type === 'job_confirm' ? sessionPendingConfirmation : null;
+  const isJobApplyContext = !!(jobListContext || jobConfirmContext);
+  const isApplyForJobIntent = intent === 'apply_for_job';
+
+  if (jobConfirmContext && isConfirmIntent) {
+    const job = jobConfirmContext.job as { id?: string; title?: string; company?: string };
+    const createRes = await runAction('createJobApplication', [
+      { name: 'userId', value: userId },
+      { name: 'jobId', value: job?.id || '' },
+      { name: 'jobTitle', value: job?.title || '' },
+      { name: 'company', value: job?.company || '' },
+    ]);
+    if (createRes?.code === 'ALREADY_APPLIED') {
+      return {
+        actionCalled: 'createJobApplication',
+        responseText: 'You have already applied for this job. Check your Applications page to track it.',
+        actionResultType: 'job_already_applied',
+        pendingConfirmation: null,
+        execution: { intent: 'apply', confidence: 0.9, steps: ['createJobApplication'] },
+      };
+    }
+    if (createRes?.success && createRes?.applicationId) {
+      return {
+        actionCalled: 'createJobApplication',
+        responseText: `Application submitted for ${job?.title || 'this job'} at ${job?.company || 'the company'}. Reference: ${createRes.applicationId}. You can track it in Applications.`,
+        applicationSubmitted: true,
+        applicationId: createRes.applicationId,
+        cards: [{ type: 'application_submitted', applicationId: createRes.applicationId }],
+        actionResultType: 'job_submitted',
+        pendingConfirmation: null,
+        execution: { intent: 'apply', confidence: 0.95, steps: ['createJobApplication'] },
+      };
+    }
+    return {
+      actionCalled: 'createJobApplication',
+      responseText: createRes?.message || 'Could not submit job application. Please try again.',
+      actionResultType: 'job_apply_error',
+      execution: { intent: 'apply', confidence: 0.8, steps: ['createJobApplication'] },
+    };
+  }
+
+  if (isApplyForJobIntent && !jobListContext) {
+    const state = extractStateHint(transcript, profile?.state || '');
+    const occupation = String(profile?.occupation || '').trim();
+    const parsed = await runAction('getJobsByProfile', [
+      { name: 'state', value: state },
+      { name: 'occupation', value: occupation },
+    ]);
+    let jobs = Array.isArray(parsed?.jobs) ? parsed.jobs.slice(0, 5) : [];
+    if (!jobs.length) {
+      const fallback = await runAction('getJobsByProfile', [
+        { name: 'state', value: state || '' },
+        { name: 'occupation', value: '' },
+      ]);
+      jobs = Array.isArray(fallback?.jobs) ? fallback.jobs.slice(0, 5) : [];
+    }
+    if (!jobs.length) {
+      return {
+        actionCalled: 'getJobsByProfile',
+        responseText: 'No jobs found right now. Try again later or say "find jobs" to search.',
+        actionResultType: 'jobs_empty',
+        execution: { intent: 'apply_for_job', confidence: 0.8, steps: ['getJobsByProfile'] },
+      };
+    }
+    const summaryResApply = await runAction('getUserApplicationsSummary', [{ name: 'userId', value: userId }]);
+    const appliedJobIdsApply = new Set(
+      (summaryResApply?.applications || []).filter((a: any) => a.jobId).map((a: any) => String(a.jobId)),
+    );
+    jobs = jobs.filter((j: any) => !appliedJobIdsApply.has(String(j.id)));
+    if (!jobs.length) {
+      return {
+        actionCalled: 'getJobsByProfile',
+        responseText: "You've already applied to all the jobs we found. Check your Applications page or say \"find jobs\" again later for new listings.",
+        actionResultType: 'jobs_all_applied',
+        execution: { intent: 'apply_for_job', confidence: 0.9, steps: ['getJobsByProfile', 'getUserApplicationsSummary'] },
+      };
+    }
+    const jobsForContext = jobs.map((j: any) => ({ id: j.id, title: j.title, company: j.company, state: j.state, salaryRange: j.salaryRange }));
+    const lines = jobs.map((j: any, i: number) =>
+      `${i + 1}. ${j.title} - ${j.company} (${j.state}) ${j.salaryRange ? `- ${j.salaryRange}` : ''}`.trim(),
+    );
+    return {
+      actionCalled: 'getJobsByProfile',
+      responseText: `Here are jobs you can apply for:\n${lines.join('\n')}\nSay "apply for job 1" or "apply for job 2" to apply.`,
+      cards: jobs.slice(0, 3).map((j: any) => ({
+        type: 'job_card',
+        jobId: j.id,
+        title: j.title,
+        company: j.company,
+        state: j.state,
+        salaryRange: j.salaryRange,
+      })),
+      pendingConfirmation: { type: 'job_list', jobs: jobsForContext },
+      actionResultType: 'jobs',
+      execution: { intent: 'apply_for_job', confidence: 0.9, steps: ['getJobsByProfile'] },
+    };
+  }
+
+  if (jobListContext && (intent === 'apply' || isApplyForJobIntent)) {
+    const jobs = Array.isArray(jobListContext.jobs) ? jobListContext.jobs : [];
+    const numMatch = normalized.match(/(?:apply|aavedan)\s+(?:for\s+)?(?:job\s+)?(\d+)/i)
+      || normalized.match(/(?:job\s+)?(\d+)\s+(?:apply|aavedan)/i);
+    const idMatch = normalized.match(/(?:apply|aavedan)\s+(?:for\s+)?(?:job\s+)([a-zA-Z0-9_-]+)/i);
+    let selectedJob: any = null;
+    if (idMatch) {
+      const matchId = idMatch[1];
+      if (/^\d+$/.test(matchId)) {
+        const jobIndex = Math.max(0, (parseInt(matchId, 10) || 1) - 1);
+        selectedJob = jobs[Math.min(jobIndex, jobs.length - 1)] || jobs[0];
+      } else {
+        selectedJob = jobs.find((j: any) => String(j.id || '') === matchId) || jobs[0];
+      }
+    } else if (numMatch) {
+      const jobIndex = Math.max(0, (parseInt(numMatch[1], 10) || 1) - 1);
+      selectedJob = jobs[Math.min(jobIndex, jobs.length - 1)] || jobs[0];
+    } else if (/\b(apply|aavedan)\s+(?:for\s+)?(this|that|it)\b/.test(normalized) || /\b(this|that|it)\s+(?:job\s+)?(?:apply|aavedan)/.test(normalized)) {
+      selectedJob = jobs[0];
+    } else {
+      selectedJob = jobs[0];
+    }
+    if (!selectedJob) {
+      return {
+        actionCalled: null,
+        responseText: 'Which job would you like to apply for? Say "apply for job 1" or "apply for job 2" etc.',
+        actionResultType: 'job_disambiguation',
+        execution: { intent: 'apply', confidence: 0.7, steps: [] },
+      };
+    }
+    const gapsRes = await runAction('collectProfileGaps', [
+      { name: 'userId', value: userId },
+      { name: 'flowType', value: 'jobs' },
+    ]);
+    const missing = Array.isArray(gapsRes?.missingFields) ? gapsRes.missingFields : [];
+    if (missing.length > 0) {
+      return {
+        actionCalled: 'collectProfileGaps',
+        responseText: `To apply for jobs, please share: ${missing.join(', ')}. For example: "My state is Karnataka, occupation is student."`,
+        cards: [{ type: 'profile_gaps', missingFields: missing }],
+        pendingConfirmation: { type: 'job_list', jobs, pendingJob: selectedJob },
+        actionResultType: 'profile_gaps',
+        execution: { intent: 'apply', confidence: 0.85, steps: ['collectProfileGaps'] },
+      };
+    }
+    const summaryRes = await runAction('getUserApplicationsSummary', [{ name: 'userId', value: userId }]);
+    const applied = (summaryRes?.applications || []).some((a: any) => String(a.jobId || '') === String(selectedJob.id));
+    if (applied) {
+      return {
+        actionCalled: 'getUserApplicationsSummary',
+        responseText: `You have already applied for ${selectedJob.title || 'this job'} at ${selectedJob.company || ''}. Check your Applications page.`,
+        actionResultType: 'job_already_applied',
+        execution: { intent: 'apply', confidence: 0.9, steps: ['getUserApplicationsSummary'] },
+      };
+    }
+    return {
+      actionCalled: null,
+      responseText: `Confirm application for ${selectedJob.title || 'this job'} at ${selectedJob.company || ''}? Say "Yes" or "Confirm" to proceed.`,
+      pendingConfirmation: {
+        type: 'job_confirm',
+        job: selectedJob,
+      },
+      cards: [{
+        type: 'job_confirm',
+        job: selectedJob,
+        jobId: selectedJob.id,
+        title: selectedJob.title,
+        company: selectedJob.company,
+      }],
+      actionResultType: 'job_confirm',
+      execution: { intent: 'apply', confidence: 0.9, steps: ['job_confirm'] },
+    };
+  }
+
+  if (jobConfirmContext && !isConfirmIntent) {
+    const job = jobConfirmContext.job as { title?: string; company?: string };
+    return {
+      actionCalled: null,
+      responseText: `To apply for ${job?.title || 'this job'} at ${job?.company || ''}, say "Yes" or "Confirm". To cancel, say "No" or "Cancel".`,
+      pendingConfirmation: jobConfirmContext,
+      actionResultType: 'job_confirm_pending',
+      execution: { intent: 'apply', confidence: 0.8, steps: [] },
+    };
+  }
 
   const explicitFromTurn = extractSchemeHintFromTranscript(transcript);
   const fromContext = extractPendingSchemeFromContext(sessionContext);
-  const schemeHint = explicitFromTurn || fromContext || transcript;
   const activePendingConfirmation = sessionPendingConfirmation && sessionPendingConfirmation.type === 'application_confirm'
     ? sessionPendingConfirmation
     : null;
   const activeFieldConfirmation = sessionPendingConfirmation && sessionPendingConfirmation.type === 'apply_field_confirmation'
     ? sessionPendingConfirmation
     : null;
+
+  // CRITICAL: Prioritize explicit names, then context, then LOCK-IN names from active workflows, finally fallback to transcript.
+  // Only use explicitFromTurn if it's a real scheme name (not a generic word like "this" / "it").
+  const usableExplicit = explicitFromTurn && !isGenericWord(explicitFromTurn) ? explicitFromTurn : null;
+  const schemeHint = usableExplicit
+    || fromContext
+    || (activeFieldConfirmation?.schemeHint as string)
+    || (activePendingConfirmation?.scheme as any)?.nameEn
+    || (activePendingConfirmation?.scheme as any)?.name
+    || transcript;
+
   const effectiveConfirmationToken = confirmationToken || String(activePendingConfirmation?.confirmationToken || '');
   const hasPendingForSubmit = !!effectiveConfirmationToken;
 
@@ -1121,12 +1361,23 @@ async function maybeHandleStructuredWorkflow(args: {
       || /ಹೌದು|ಸರಿ/.test(transcript)
       || /हो|हाँ|ठीक/.test(transcript);
     const parsedChange = parseFieldChangeCandidate(transcript, currentField);
-    const schemeHintFromFieldFlow = String(activeFieldConfirmation.schemeHint || schemeHint || '').trim();
+
+    // CRITICAL: Always use the locked-in scheme name from the very first 'apply' turn.
+    // Never fall back to the current transcript (e.g. 'Yes') during the field confirmation loop.
+    const schemeHintFromFieldFlow = String(activeFieldConfirmation.schemeHint || '').trim();
+
+    if (!schemeHintFromFieldFlow) {
+      // Emergency fallback to context if somehow the lock-in was lost
+      const contextRedundancy = extractPendingSchemeFromContext(sessionContext);
+      if (contextRedundancy) activeFieldConfirmation.schemeHint = contextRedundancy;
+    }
+
     const prepareAfterFieldConfirmation = async (): Promise<ApplyFlowResult> => {
+      const finalQuery = (activeFieldConfirmation.schemeHint as string) || schemeHint;
       const prepared = await runAction('prepareApplication', [
         { name: 'userId', value: userId },
-        { name: 'query', value: schemeHintFromFieldFlow },
-        { name: 'schemeName', value: schemeHintFromFieldFlow },
+        { name: 'query', value: finalQuery },
+        { name: 'schemeName', value: finalQuery },
       ]);
       if (prepared?.code === 'DATA_UNAVAILABLE') {
         return {
@@ -1143,32 +1394,45 @@ async function maybeHandleStructuredWorkflow(args: {
       }
       if (prepared?.success === true && prepared?.code === 'NEEDS_CONFIRMATION' && prepared?.scheme) {
         const missingDocs = Array.isArray(prepared.missingDocuments) ? prepared.missingDocuments : [];
+        const availableDocs = Array.isArray(prepared.availableDocuments) ? prepared.availableDocuments : [];
         const documentCards = missingDocs.map((d: string) => ({
           type: 'document_upload',
           documentType: d,
           uploadApiPath: '/documents/upload',
           openPage: '/documents',
         }));
+        let responseText = `All details confirmed. You are applying for ${prepared.scheme.nameEn || prepared.scheme.name}. `;
+        if (availableDocs.length > 0) {
+          responseText += `We will use your existing document(s): ${availableDocs.join(', ')}. `;
+        }
+        if (missingDocs.length > 0) {
+          responseText += `Please upload: ${missingDocs.join(', ')}. `;
+        }
+        responseText += 'Once all documents are uploaded, say: confirm application.';
         return {
           actionCalled: 'prepareApplication',
-          responseText: `All details confirmed. You are applying for ${prepared.scheme.nameEn || prepared.scheme.name}. Say: confirm application.`,
+          responseText,
           pendingConfirmation: {
             type: 'application_confirm',
             confirmationToken: prepared.confirmationToken || null,
             scheme: prepared.scheme,
             missingDocuments: missingDocs,
+            availableDocuments: availableDocs,
           },
           pendingAction: {
             type: 'application_confirm',
             confirmationToken: prepared.confirmationToken || null,
             scheme: prepared.scheme,
             missingDocuments: missingDocs,
+            availableDocuments: availableDocs,
           },
           cards: [
             {
               type: 'application_confirm',
               confirmationToken: prepared.confirmationToken || null,
               scheme: prepared.scheme,
+              missingDocuments: missingDocs,
+              availableDocuments: availableDocs,
             },
             ...documentCards,
           ],
@@ -1374,6 +1638,23 @@ async function maybeHandleStructuredWorkflow(args: {
         },
       };
     }
+    if (parsed?.code === 'MISSING_DOCUMENTS') {
+      const missing = Array.isArray(parsed.missingDocuments) ? parsed.missingDocuments : [];
+      return {
+        actionCalled: 'submitApplication',
+        responseText: `Please upload all required documents before submitting. Missing: ${missing.join(', ')}. Use the upload cards below, then say confirm application again.`,
+        actionResultType: 'missing_documents_blocked',
+        pendingConfirmation: activePendingConfirmation ? { ...activePendingConfirmation, missingDocuments: missing } : null,
+        pendingAction: activePendingConfirmation ? { ...activePendingConfirmation, missingDocuments: missing } : null,
+        cards: missing.map((d: string) => ({ type: 'document_upload', documentType: d, openPage: '/documents' })),
+        execution: {
+          intent,
+          confidence: 0.9,
+          entities: { schemeHint, missingDocuments: missing },
+          steps: ['submitApplication', 'missing_documents_blocked'],
+        },
+      };
+    }
     if (parsed?.success === true) {
       const submitFallback = `Application submitted! Reference: ${parsed.applicationId || 'N/A'}.`;
       const submitOrch = await safeGenerateResponse(
@@ -1428,6 +1709,7 @@ async function maybeHandleStructuredWorkflow(args: {
         },
         pendingAction: {
           type: 'scheme_disambiguation',
+          schemeHint,
           options: opts.map((o: any) => ({
             id: o.id,
             code: o.code,
@@ -1469,202 +1751,103 @@ async function maybeHandleStructuredWorkflow(args: {
     };
   }
 
-  const applyGapCheck = await runAction('collectProfileGaps', [
-    { name: 'userId', value: userId },
-    { name: 'flowType', value: 'apply' },
-  ]);
-  const applyMissingFields: string[] = Array.isArray(applyGapCheck?.missingFields) ? applyGapCheck.missingFields : [];
-  if (applyMissingFields.length > 0) {
-    return {
-      actionCalled: 'collectProfileGaps',
-      responseText: `Before applying, please confirm these details: ${applyMissingFields.slice(0, 4).join(', ')}.`,
-      actionResultType: 'needs_profile_fields',
-      cards: [{ type: 'profile_gaps', flowType: 'apply', missingFields: applyMissingFields }],
-      grounding: { sources: ['users_table'] },
-      execution: {
-        intent,
-        confidence: 0.91,
-        entities: { missingFields: applyMissingFields },
-        steps: ['collectProfileGaps'],
-      },
-    };
-  }
-
-  if (!activeFieldConfirmation && !activePendingConfirmation && currentState !== 'APPLY_SUBMIT_CONFIRMATION') {
-    const fieldOrder = ['name', 'phone', 'state', 'district', 'address'];
-    const values: Record<string, string> = {};
-    for (const f of fieldOrder) {
-      values[f] = getProfileValueForField(profile, f);
-    }
-    const firstField = fieldOrder[0];
-    return {
-      actionCalled: 'confirmApplicationField',
-      responseText: `Before submitting, let's confirm details. ${buildFieldPrompt(firstField, values[firstField], effectiveLanguage)}`,
-      pendingConfirmation: {
-        type: 'apply_field_confirmation',
-        index: 0,
-        fieldOrder,
-        values,
-        schemeHint,
-      },
-      pendingAction: {
-        type: 'apply_field_confirmation',
-        index: 0,
-        fieldOrder,
-        values,
-        schemeHint,
-      },
-      cards: [{ type: 'field_confirm', field: firstField, value: values[firstField] || '' }],
-      grounding: { sources: ['users_table', 'documents_table'] },
-      actionResultType: 'field_confirmation_pending',
-      execution: {
-        intent,
-        confidence: 0.9,
-        entities: { field: firstField },
-        steps: ['confirmApplicationField'],
-      },
-    };
-  }
-
-  const parsed = await runAction('prepareApplication', [
+  // 1. First, try to identify/prepare the application to lock in the scheme and check eligibility
+  const initialPrep = await runAction('prepareApplication', [
     { name: 'userId', value: userId },
     { name: 'query', value: schemeHint },
     { name: 'schemeName', value: schemeHint },
   ]);
-  if (parsed?.code === 'DATA_UNAVAILABLE') {
+
+  if (initialPrep?.code === 'DATA_UNAVAILABLE') {
     return {
       actionCalled: 'prepareApplication',
-      responseText: 'I cannot access live scheme/application data right now. Please try again shortly.',
+      responseText: 'I cannot access live scheme data right now. Please try again shortly.',
       actionResultType: 'data_unavailable',
-      execution: {
-        intent,
-        confidence: 0.9,
-        entities: { schemeHint },
-        steps: ['prepareApplication', 'data_unavailable'],
-      },
+      execution: { intent, confidence: 0.9, entities: { schemeHint }, steps: ['prepareApplication', 'data_unavailable'] },
     };
   }
-  if (parsed?.success === true && parsed?.code === 'NEEDS_CONFIRMATION' && parsed?.scheme) {
-    const missingDocs = Array.isArray(parsed.missingDocuments) ? parsed.missingDocuments : [];
-    const documentCards = missingDocs.map((d: string) => ({
-      type: 'document_upload',
-      documentType: d,
-      uploadApiPath: '/documents/upload',
-      openPage: '/documents',
-    }));
-    const prepFallback = `Applying for ${parsed.scheme.nameEn || parsed.scheme.name} (up to \u20B9${Number(parsed.scheme.benefitRs || 0).toLocaleString('en-IN')}).${missingDocs.length ? ` Missing: ${missingDocs.join(', ')}.` : ''} Say confirm to proceed.`;
-    const prepOrch = await safeGenerateResponse(
-      {
-        intent: 'apply',
-        language: effectiveLanguage,
-        transcript,
-        schemes: [{
-          id: parsed.scheme.id || parsed.scheme.code,
-          code: parsed.scheme.code,
-          name: parsed.scheme.nameEn || parsed.scheme.name,
-          nameHi: parsed.scheme.nameHi,
-          description: parsed.scheme.description || '',
-          benefitRs: Number(parsed.scheme.benefitRs || 0),
-          category: parsed.scheme.category || '',
-        }],
-        additionalContext: `User wants to apply. Missing documents: ${missingDocs.join(', ') || 'none'}. Ask them to confirm.`,
-      },
-      prepFallback,
-    );
+
+  // Handle ambiguous matches immediately
+  if (initialPrep?.code === 'AMBIGUOUS_TOP3' && Array.isArray(initialPrep?.options)) {
+    const opts = initialPrep.options.slice(0, 3);
     return {
       actionCalled: 'prepareApplication',
-      responseText: prepOrch.responseText || prepFallback,
-      serviceTrace: prepOrch.serviceTrace,
-      pendingConfirmation: {
-        type: 'application_confirm',
-        confirmationToken: parsed.confirmationToken || null,
-        scheme: parsed.scheme,
-        missingDocuments: missingDocs,
-      },
-      pendingAction: {
-        type: 'application_confirm',
-        confirmationToken: parsed.confirmationToken || null,
-        scheme: parsed.scheme,
-        missingDocuments: missingDocs,
-      },
-      cards: [
-        {
-          type: 'application_confirm',
-          confirmationToken: parsed.confirmationToken || null,
-          scheme: parsed.scheme,
-          missingDocuments: missingDocs,
-        },
-        ...documentCards,
-      ],
-      grounding: { sources: ['schemes_table', 'documents_table', 'users_table'] },
-      actionResultType: 'prepare_apply',
-      execution: {
-        intent,
-        confidence: 0.94,
-        entities: { schemeHint },
-        steps: ['prepareApplication', 'novapro_orchestrator'],
-        tool: 'prepareApplication',
-        dataSource: 'aurora',
-      },
-    };
-  }
-  if (parsed?.code === 'AMBIGUOUS_TOP3' && Array.isArray(parsed?.options)) {
-    const opts = parsed.options.slice(0, 3);
-    const top = opts.map((m: any) => m.nameEn || m.name || m.code || m.id).join(', ');
-    return {
-      actionCalled: 'prepareApplication',
-      responseText: `${parsed.message || 'I found multiple matching schemes.'} Options: ${top}.`,
+      responseText: `${initialPrep.message || 'I found multiple matching schemes.'} Please choose one option.`,
       pendingConfirmation: {
         type: 'scheme_disambiguation',
-        options: opts.map((o: any) => ({
-          id: o.id,
-          code: o.code,
-          name: o.nameEn || o.name,
-          benefitRs: o.benefitRs,
-        })),
+        schemeHint,
+        options: opts.map((o: any) => ({ id: o.id, code: o.code, name: o.name, benefitRs: o.benefitRs })),
       },
       pendingAction: {
         type: 'scheme_disambiguation',
-        options: opts.map((o: any) => ({
-          id: o.id,
-          code: o.code,
-          name: o.nameEn || o.name,
-          benefitRs: o.benefitRs,
-        })),
+        schemeHint,
+        options: opts.map((o: any) => ({ id: o.id, code: o.code, name: o.name, benefitRs: o.benefitRs })),
       },
-      cards: [
-        {
-          type: 'scheme_disambiguation',
-          options: opts.map((o: any) => ({
-            id: o.id,
-            code: o.code,
-            name: o.nameEn || o.name,
-            benefitRs: o.benefitRs,
-          })),
-        },
-      ],
-      grounding: { sources: ['schemes_table'] },
+      cards: [{
+        type: 'scheme_disambiguation',
+        options: opts.map((o: any) => ({ id: o.id, code: o.code, name: o.name, benefitRs: o.benefitRs })),
+      }],
       actionResultType: 'scheme_disambiguation',
+      execution: { intent, confidence: 0.85, entities: { schemeHint }, steps: ['prepareApplication'] },
+    };
+  }
+
+  // If we have a scheme (even if it normally needs docs/confirmation),
+  // we follow the user request to ALWAYS perform individual field confirmations first.
+  if ((initialPrep?.success === true || initialPrep?.code === 'NEEDS_CONFIRMATION') && initialPrep?.scheme) {
+    const verifiedSchemeName = initialPrep.scheme.nameEn || initialPrep.scheme.name;
+    const coreFields = ['name', 'phone', 'state', 'district', 'address'];
+
+    // Fetch current profile to show existing values for confirmation
+    const currentProfile = await fetchUserProfile(userId);
+    const initialValues: Record<string, string> = {
+      name: currentProfile.name || '',
+      phone: currentProfile.phone_number || currentProfile.phone || '',
+      state: currentProfile.state || '',
+      district: currentProfile.district || '',
+      address: currentProfile.address || '',
+    };
+
+    return {
+      actionCalled: 'confirmApplicationField',
+      responseText: `I can help you apply for ${verifiedSchemeName}. First, let's verify your details. ${buildFieldPrompt(coreFields[0], initialValues[coreFields[0]], effectiveLanguage)}`,
+      pendingConfirmation: {
+        type: 'apply_field_confirmation',
+        index: 0,
+        fieldOrder: coreFields,
+        values: initialValues,
+        schemeHint: verifiedSchemeName, // LOCK IN THE SCHEME NAME FOR THE DURATION OF THE LOOP
+      },
+      pendingAction: {
+        type: 'apply_field_confirmation',
+        index: 0,
+        fieldOrder: coreFields,
+        values: initialValues,
+        schemeHint: verifiedSchemeName,
+      },
+      cards: [{ type: 'field_confirm', field: coreFields[0], value: initialValues[coreFields[0]] || '' }],
+      actionResultType: 'field_confirmation_pending',
+      grounding: { sources: ['users_table'] },
       execution: {
         intent,
-        confidence: 0.82,
-        entities: { schemeHint },
-        steps: ['prepareApplication'],
+        confidence: 0.92,
+        entities: { schemeHint: verifiedSchemeName, field: coreFields[0] },
+        steps: ['prepareApplication', 'start_field_confirmation'],
       },
     };
   }
+
+  // Fallback if no scheme found or other error
   return {
     actionCalled: 'prepareApplication',
-    responseText: parsed?.message || 'Please share the exact scheme name to continue.',
-    actionResultType: 'apply_error',
-    execution: {
-      intent,
-      confidence: 0.8,
-      entities: { schemeHint },
-      steps: ['prepareApplication'],
-    },
+    responseText: initialPrep?.message || 'I could not find that scheme. Could you please specify the name again?',
+    actionResultType: 'scheme_not_found',
+    execution: { intent, confidence: 0.8, entities: { schemeHint }, steps: ['prepareApplication'] },
   };
+  // No fallback here, covered by the schemes intent above.
+  return null;
 }
+
 
 function dedupeSessionContext(turns: SessionTurn[]): SessionTurn[] {
   const out: SessionTurn[] = [];
@@ -1696,18 +1879,20 @@ function shouldResumeSchemesAfterProfileUpdate(sessionContext: SessionTurn[]): b
     .map((t) => normalizeText(t.content || ''))[0] || '';
 
   if (!latestAssistant) return false;
-  if (
-    latestAssistant.includes('before applying please confirm these details')
-    || latestAssistant.includes('missing: address')
-    || latestAssistant.includes('before applying')
-  ) {
-    return false;
-  }
 
-  return latestAssistant.includes('to find suitable schemes')
-    || latestAssistant.includes('missing required profile fields')
-    || latestAssistant.includes('i need more profile details')
-    || (latestAssistant.includes('more details needed') && latestAssistant.includes('missing'));
+  // High confidence keywords for scheme/job context
+  const hasContext =
+    latestAssistant.includes('scheme')
+    || latestAssistant.includes('yojana')
+    || latestAssistant.includes('benefit')
+    || latestAssistant.includes('job')
+    || latestAssistant.includes('eligible')
+    || latestAssistant.includes('apply')
+    || latestAssistant.includes('missing')
+    || latestAssistant.includes('details needed')
+    || latestAssistant.includes('profile');
+
+  return hasContext;
 }
 
 async function buildSchemesEligibilityResponse(args: {
@@ -1966,15 +2151,25 @@ function buildFieldPrompt(field: string, value: string, language: string): strin
 function parseFieldChangeCandidate(transcript: string, currentField: string): string | null {
   const text = String(transcript || '').trim();
   if (!text) return null;
-  if (/^(yes|ok|okay|confirm|haan|haanji)$/i.test(text)) return null;
-  if (/^(no|nahi|nahin)$/i.test(text)) return null;
+  // Ignore explicit confirm/deny words
+  if (/^(yes|ok|okay|confirm|haan|haanji|ho|theek|seri|avunu|सही|ठीक|हाँ|अवश्य|ಹೌದು|ಸರಿ)$/i.test(text)) return null;
+  if (/^(no|nahi|nahin|नहीं|இல்லை|లేదు|ಇಲ್ಲ|नाही)$/i.test(text)) return null;
 
   let candidate = '';
   const direct = text.match(new RegExp(`change\\s+${currentField}\\s+to\\s+(.+)`, 'i'));
   if (direct?.[1]) candidate = direct[1].trim().replace(/[.?!]+$/, '');
   const generic = text.match(/change\s+to\s+(.+)/i);
   if (!candidate && generic?.[1]) candidate = generic[1].trim().replace(/[.?!]+$/, '');
-  if (!candidate && text.length >= 2 && text.length <= 160) candidate = text.replace(/[.?!]+$/, '');
+
+  // If no explicit instruction, use the whole text ONLY IF it doesn't sound like a workflow command
+  if (!candidate && text.length >= 2 && text.length <= 160) {
+    const isIntentCommand = /\b(apply|want to apply|status|jobs?|schemes?|yojana|benefits?|profile|language|check|track|show)\b/i.test(text);
+    if (isIntentCommand) {
+      // It's likely an intent switch, not a field value. Prevent corrupting profile with "I want to apply for PM Awas"
+      return null;
+    }
+    candidate = text.replace(/[.?!]+$/, '');
+  }
   return normalizeFieldValueForConfirmation(currentField, candidate || text);
 }
 
@@ -1991,30 +2186,32 @@ function normalizeFieldValueForConfirmation(field: string, candidate: string): s
 
   if (field === 'name') {
     const seemsOtherField =
-      /\b(address|adress|addr|district|state|income|salary|caste|occupation|age|gender|phone|mobile|number)\b/i.test(base)
+      /\b(address|adress|addr|district|state|income|salary|caste|occupation|age|gender|phone|mobile|number|apply|yojana|scheme|status)\b/i.test(base)
       && !/\bname\b/i.test(base);
     if (seemsOtherField) return null;
     const v = base
       .replace(/^no[, ]*/i, '')
       .replace(/^(?:my\s+)?name\s*(?:is|:)?\s*/i, '')
       .trim();
-    if (!v || v.length < 2 || !/[a-z]/i.test(v) || isOpaqueIdLike(v) || /^\+?\d{8,}$/.test(v)) return null;
+    // Names generally shouldn't be > 5 words or > 60 chars or contain numbers
+    if (!v || v.length < 2 || v.length > 60 || v.split(/\s+/).length > 5 || !/[a-z\u0900-\u0D7F]/i.test(v) || isOpaqueIdLike(v) || /^\+?\d{8,}$/.test(v)) return null;
     return v;
   }
 
   if (field === 'state') {
     const v = base.replace(/^state\s*(?:is|:)?\s*/i, '').trim();
-    if (!v) return null;
+    if (!v || /\b(apply|scheme|yojana|status|job|profile)\b/i.test(v)) return null;
     return isKnownState(v) || isKnownState(normalizeText(v)) ? v : null;
   }
 
   if (field === 'district') {
-    if (/\b(address|adress|addr)\b/i.test(base) && !/\bdistrict\b/i.test(base)) return null;
+    if (/\b(address|adress|addr|apply|scheme|yojana|status|job)\b/i.test(base) && !/\bdistrict\b/i.test(base)) return null;
     const v = sanitizeDistrictForPrompt(base.replace(/^district\s*(?:is|:)?\s*/i, '').trim());
     return v.length >= 2 ? v : null;
   }
 
   if (field === 'address') {
+    if (/\b(apply|scheme|yojana|status|job|profile)\b/i.test(base)) return null;
     const v = sanitizeAddressForPrompt(
       base
         .replace(/^my\s+address\s*(?:is|:)?\s*/i, '')
@@ -2110,7 +2307,7 @@ function parseProfilePatchFromTranscript(transcript: string): Record<string, str
   const normalized = normalizeText(raw);
   const hasAddressKeyword = /\b(address|adress|addr)\b/i.test(raw);
   const hasDistrictKeyword = /\bdistrict\b/i.test(raw);
-  if (/^(yes|ok|okay|confirm|haan|haanji|no|nahi|nahin|cancel)$/i.test(normalized)) {
+  if (/^(hi|hello|hey|namaste|namaskar|namaskara|namaskaram|yes|ok|okay|confirm|haan|haanji|no|nahi|nahin|cancel)$/i.test(normalized)) {
     return out;
   }
 
@@ -2352,8 +2549,12 @@ function parseProfilePatchFromTranscript(transcript: string): Record<string, str
   const allowDistrictFromLeftover = !(hasAddressKeyword && !hasDistrictKeyword && !hasExplicitStateOrFromCue);
 
   if (!out.district && leftoverLocation.length > 0 && allowDistrictFromLeftover) {
-    const inferredOcc = normalizeOccupation(leftoverLocation[0]);
-    if (!inferredOcc) out.district = leftoverLocation[0];
+    const loc = leftoverLocation[0];
+    const inferredOcc = normalizeOccupation(loc);
+    const isGreeting = /^(hi|hello|hey|namaste|namaskar|namaskara|namaskaram)$/i.test(normalizeText(loc));
+    if (!inferredOcc && !isGreeting && loc.length >= 3) {
+      out.district = loc;
+    }
   }
 
   if (!out.address && leftoverLocation.length > 1) {
@@ -2532,12 +2733,39 @@ function extractDocumentId(text: string): string | null {
 }
 
 function extractPendingSchemeFromContext(sessionContext: SessionTurn[]): string | null {
+  // Scan most recent turns first
   for (const turn of [...sessionContext].reverse()) {
     const text = turn.content || '';
-    const m1 = text.match(/applying for\s+([^.(\n]+)/i);
-    if (m1?.[1]) return m1[1].trim();
-    const m2 = text.match(/confirm application for\s+([^.(\n]+)/i);
-    if (m2?.[1]) return m2[1].trim();
+
+    if (turn.role === 'assistant') {
+      // Patterns for assistant proposing, confirming or listing schemes
+      const patterns = [
+        /applying for\s+([^.(\n,]+)/i,
+        /confirm application for\s+([^.(\n,]+)/i,
+        /can apply for\s+([^.(\n,]+)/i,
+        /applying for\s+([^.(\n,]+)/i,
+        /scheme:\s+([^.(\n,]+)/i,
+        // "You are applying for Pradhan Mantri Suraksha Bima Yojana"
+        /you are applying for\s+([^.(\n,]+)/i,
+        // "I can help you apply for X"
+        /help you apply for\s+([^.(\n,]+)/i,
+        // "Consider X for a benefit"
+        /consider\s+([^.(\n,]+?)\s+for\s+a\s+/i,
+        // Numbered list items like "1. PM Awas Yojana (Urban) with a benefit..."
+        /\d+\.\s+([^.(\n,]+?)\s+(?:with|for|offering|provides?)\s+/i,
+      ];
+      for (const p of patterns) {
+        const m = text.match(p);
+        if (m?.[1]) {
+          const candidate = cleanSchemeCandidate(m[1]);
+          if (candidate.length >= 4 && !isGenericWord(candidate)) return candidate;
+        }
+      }
+    } else if (turn.role === 'user') {
+      // Also check user turns for explicit scheme names they mentioned
+      const hint = extractSchemeHintFromTranscript(text);
+      if (hint && !isGenericWord(hint)) return hint;
+    }
   }
   return null;
 }
@@ -2573,19 +2801,77 @@ function extractStateHint(transcript: string, fallbackState: string): string {
   return fallbackState || '';
 }
 
+// Generic words that are NOT scheme names — if the extracted hint is one of these,
+// we should fall back to context rather than returning a useless hint.
+const GENERIC_APPLY_WORDS = new Set([
+  'this', 'it', 'that', 'scheme', 'here', 'one', 'now', 'please',
+  'the scheme', 'this scheme', 'that scheme', 'for this', 'for it',
+]);
+
+function cleanSchemeCandidate(raw: string): string {
+  return raw
+    .replace(/\b(for this|for it|this scheme|now|fucking|please|kindly|apply for this|apply for it)\b/gi, '')
+    .replace(/[.?!,]+$/, '')
+    // Strip leading list prefix (e.g. "1. ", "2. ", "3. ")
+    .replace(/^\s*\d+\.\s*/, '')
+    // Strip trailing benefit/description noise like "with a benefit of up to ₹1,00,000"
+    .replace(/\s+with\s+a\s+benefit.*/i, '')
+    .replace(/\s+offering\s+.*/i, '')
+    .replace(/\s+provides?\s+.*/i, '')
+    .trim();
+}
+
+function isGenericWord(candidate: string): boolean {
+  const lower = candidate.toLowerCase().trim();
+  return GENERIC_APPLY_WORDS.has(lower) || lower.length < 4;
+}
+
 function extractSchemeHintFromTranscript(transcript: string): string | null {
-  const text = transcript.trim();
-  const patterns = [
-    /apply for\s+(.+)/i,
-    /application for\s+(.+)/i,
-    /confirm application for\s+(.+)/i,
-    /apply\s+(.+)/i,
+  if (!transcript?.trim()) return null;
+
+  // STEP 1: Try the first non-empty line as a direct scheme name hint.
+  // Users commonly type the scheme name on line 1, then "i want to apply" on line 2.
+  const lines = transcript.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length >= 2) {
+    const firstLine = lines[0];
+    const restText = lines.slice(1).join(' ').toLowerCase();
+    const hasApplyInRest = /\b(apply|application|submit|register|apply for|i want to apply|ಅಪ್ಲೈ|आवेदन)\b/.test(restText);
+    if (hasApplyInRest && firstLine.length >= 5 && firstLine.split(' ').length >= 2) {
+      const cleaned = cleanSchemeCandidate(firstLine);
+      if (cleaned.length >= 5 && !isGenericWord(cleaned)) return cleaned;
+    }
+  }
+
+  // STEP 2: Collapse into single line for regex matching
+  const text = transcript.replace(/\r?\n/g, ' ').trim();
+
+  // Patterns ordered from most specific to least specific.
+  // Each pattern tries to capture the scheme name BEFORE the apply verb.
+  const patterns: RegExp[] = [
+    // "PM Awas Yojana (Urban) apply for this" — scheme name BEFORE "apply"
+    /^(.+?)\s+(?:apply|apply for this|apply for it|i want to apply|apply now)\b/i,
+    // "apply for PM Awas Yojana (Urban)"
+    /\bapply\s+for\s+["']?([^"'\n]+?)["']?\s*(?:scheme|yojana|portal|mission|programme|program|card|nidhi|bima|yojana)?\s*$/i,
+    // "application for X"
+    /\bapplication\s+(?:for\s+)?([^"'\n]+?)$/i,
+    // "confirm application for X"
+    /\bconfirm\s+application\s+(?:for\s+)?([^"'\n]+?)$/i,
+    // "i want to apply for X"
+    /\bi\s+want\s+to\s+apply\s+(?:for\s+)?([^"'\n]+?)$/i,
+    // "i am looking for X"
+    /\bi\s+am\s+looking\s+(?:for\s+)?([^"'\n]+?)$/i,
+    // Kannada / Hindi patterns
+    /(.+?)\s+apply\s+ಮಾಡಬೇಕು/i,
+    /(.+?)\s+ಅಪ್ಲೈ\s+ಮಾಡಬೇಕು/i,
+    /(.+?)\s+के\s+लिए\s+आवेदन/i,
+    /(.+?)\s+yojana\s+apply/i,
   ];
+
   for (const p of patterns) {
     const m = text.match(p);
     if (m?.[1]) {
-      const candidate = m[1].replace(/[.?!]+$/, '').trim();
-      if (candidate.length >= 3) return candidate;
+      const candidate = cleanSchemeCandidate(m[1]);
+      if (candidate.length >= 3 && !isGenericWord(candidate)) return candidate;
     }
   }
   return null;

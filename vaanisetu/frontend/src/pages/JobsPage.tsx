@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { useQuery } from 'react-query';
-import { fetchJobs, matchJobs, fetchProfile, type Job } from '../services/api';
+import { fetchJobs, matchJobs, fetchProfile, fetchApplications, type Job } from '../services/api';
 import Button from '../components/Common/Button';
 import { SkeletonCard } from '../components/Common/Skeleton';
+import JobApplyModal from '../components/Jobs/JobApplyModal';
 import { useLanguage } from '../contexts/LanguageContext';
+import { getApiUserId } from '../contexts/AuthContext';
 
 const JOB_TYPE_KEYS = ['jobs.type_all', 'jobs.full_time', 'jobs.part_time', 'jobs.gig', 'jobs.contract'] as const;
 const JOB_TYPES = ['All', 'Full-time', 'Part-time', 'Gig', 'Contract'];
@@ -25,10 +27,13 @@ function companyColor(name: string): string {
 
 export default function JobsPage() {
   const { t } = useLanguage();
+  const userId = getApiUserId();
   const [state, setState] = useState('');
   const [jobType, setJobType] = useState('All');
   const [matchedJobs, setMatchedJobs] = useState<(Job & { matchScore?: number; matchReason?: string })[] | null>(null);
   const [matching, setMatching] = useState(false);
+  const [applyError, setApplyError] = useState<string | null>(null);
+  const [modalJob, setModalJob] = useState<Job | null>(null);
 
   const { data, isLoading } = useQuery(
     ['jobs', state, jobType],
@@ -37,6 +42,14 @@ export default function JobsPage() {
       type: jobType === 'All' ? undefined : jobType,
       limit: 20,
     })
+  );
+
+  const { data: applicationsData } = useQuery('applications', () => fetchApplications());
+  const applications = Array.isArray(applicationsData) ? applicationsData : [];
+  const appliedJobIds = new Set(
+    applications
+      .filter((a: { job_id?: string }) => a.job_id)
+      .map((a: { job_id?: string }) => a.job_id)
   );
 
   const jobs: Job[] = data?.data?.jobs ?? [];
@@ -54,6 +67,12 @@ export default function JobsPage() {
     } finally {
       setMatching(false);
     }
+  };
+
+  const handleApplyClick = (job: Job) => {
+    if (appliedJobIds.has(job.jobId ?? '')) return;
+    setApplyError(null);
+    setModalJob(job);
   };
 
   return (
@@ -92,13 +111,20 @@ export default function JobsPage() {
           {matching ? t('jobs.loading') : t('jobs.find_matches')}
         </Button>
       </div>
+      {applyError ? <p className="text-sm text-red-700">{applyError}</p> : null}
 
       {matchedJobs !== null && matchedJobs.length > 0 && (
         <section>
           <h2 className="font-display text-lg font-semibold text-text-primary mb-4">{t('jobs.for_you')}</h2>
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
             {matchedJobs.map((job) => (
-              <JobCard key={job.jobId ?? `${job.title}-${job.company}`} job={job} showMatch />
+              <JobCard
+                key={job.jobId ?? `${job.title}-${job.company}`}
+                job={job}
+                showMatch
+                applied={appliedJobIds.has(job.jobId ?? '')}
+                onApply={handleApplyClick}
+              />
             ))}
           </div>
         </section>
@@ -122,16 +148,41 @@ export default function JobsPage() {
         ) : (
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
             {jobs.map((job) => (
-              <JobCard key={job.jobId ?? `${job.title}-${job.company}`} job={job} showMatch={false} />
+              <JobCard
+                key={job.jobId ?? `${job.title}-${job.company}`}
+                job={job}
+                showMatch={false}
+                applied={appliedJobIds.has(job.jobId ?? '')}
+                onApply={handleApplyClick}
+              />
             ))}
           </div>
         )}
       </section>
+
+      {modalJob && (
+        <JobApplyModal
+          job={modalJob}
+          isOpen={!!modalJob}
+          onClose={() => setModalJob(null)}
+          onSuccess={() => setModalJob(null)}
+        />
+      )}
     </div>
   );
 }
 
-function JobCard({ job, showMatch }: { job: Job & { matchScore?: number; matchReason?: string }; showMatch?: boolean }) {
+function JobCard({
+  job,
+  showMatch,
+  applied,
+  onApply,
+}: {
+  job: Job & { matchScore?: number; matchReason?: string };
+  showMatch?: boolean;
+  applied?: boolean;
+  onApply: (job: Job) => void;
+}) {
   const { t } = useLanguage();
   const initial = companyInitial(job.company ?? '');
   const color = companyColor(job.company ?? '');
@@ -180,9 +231,15 @@ function JobCard({ job, showMatch }: { job: Job & { matchScore?: number; matchRe
               )}
             </div>
           )}
-          <Button size="sm" className="mt-4">
-            {t('jobs.apply')}
-          </Button>
+          {applied ? (
+            <span className="inline-flex mt-4 px-3 py-1.5 text-sm font-medium rounded-md bg-green-100 text-green-800">
+              {t('jobs.applied')}
+            </span>
+          ) : (
+            <Button size="sm" className="mt-4" onClick={() => onApply(job)}>
+              {t('jobs.apply')}
+            </Button>
+          )}
         </div>
       </div>
     </div>

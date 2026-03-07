@@ -1,6 +1,6 @@
 import type { APIGatewayProxyHandler } from 'aws-lambda';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from '../../utils/logger.js';
 import { sendSuccessResponse, sendErrorResponse } from '../../utils/responses.js';
 import { getUserIdFromEvent } from '../../utils/user-id.js';
@@ -30,15 +30,17 @@ export const handler: APIGatewayProxyHandler = async (event) => {
     }
 
     if (!item) {
-      const res = await doc.send(
-        new QueryCommand({
-          TableName: DOCUMENTS_TABLE,
-          KeyConditionExpression: 'user_id = :uid AND document_id = :did',
-          ExpressionAttributeValues: { ':uid': userId, ':did': documentId },
-          Limit: 1,
-        })
-      );
-      item = res.Items?.[0];
+      try {
+        const res = await doc.send(
+          new GetCommand({
+            TableName: DOCUMENTS_TABLE,
+            Key: { user_id: String(userId), document_id: String(documentId) },
+          })
+        );
+        item = res.Item ?? null;
+      } catch (getErr) {
+        logger.warn('DynamoDB Get failed for document status', { userId, documentId, getErr });
+      }
       if (!item) {
         logger.warn('Document not found in DynamoDB', { userId, documentId });
       }
@@ -49,6 +51,11 @@ export const handler: APIGatewayProxyHandler = async (event) => {
     return sendSuccessResponse({
       documentId: item.document_id,
       status: item.status ?? 'pending',
+      current_stage: item.current_stage,
+      processing_steps: item.processing_steps,
+      is_current: item.is_current ?? false,
+      replaces_document_id: item.replaces_document_id ?? null,
+      replacement_decision: item.replacement_decision ?? null,
       structured_data: item.structured_data,
       processed_at: item.processed_at,
       error_message: item.error_message,

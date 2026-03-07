@@ -20,10 +20,12 @@ import { handler as schemesSearchHandler } from './api/schemes/search.js';
 import { handler as documentUploadHandler } from './api/documents/upload.js';
 import { handler as documentStatusHandler } from './api/documents/status.js';
 import { handler as documentListHandler } from './api/documents/list.js';
+import { handler as documentResolveHandler } from './api/documents/resolve.js';
 import { handler as applicationCreateHandler } from './api/applications/create.js';
 import { handler as applicationListHandler } from './api/applications/list.js';
 import { handler as voiceQueryHandler } from './api/voice/query.js';
 import { handler as voiceTranscribeHandler } from './api/voice/transcribe.js';
+import { handler as telegramWebhookHandler } from './api/telegram/webhook.js';
 import { handler as jobsListHandler } from './api/jobs/list.js';
 import { handler as jobsMatchHandler } from './api/jobs/match.js';
 import { handler as userProfileHandler } from './api/user/profile.js';
@@ -33,6 +35,11 @@ import { handler as verifyAadhaarHandler } from './api/verify/aadhaar.js';
 import { handler as verifyPanHandler } from './api/verify/pan.js';
 import { handler as verifyPassbookHandler } from './api/verify/passbook.js';
 import { handler as verifyIncomeCertHandler } from './api/verify/income-certificate.js';
+import {
+  createDocumentProcessingSteps,
+  normalizeDocumentProcessingSteps,
+  updateDocumentProcessingStep,
+} from './utils/document-processing.js';
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
@@ -138,6 +145,16 @@ app.get('/api/documents/:id/status', async (req, res) => {
   }
 });
 
+app.post('/api/documents/:id/resolve', async (req, res) => {
+  try {
+    const event = toApiGatewayEvent(req);
+    const result = await documentResolveHandler(event as never, {} as never, () => { }) as { statusCode: number; headers?: Record<string, string>; body: string };
+    sendLambdaResponse(res, result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
+
 // Real local file upload handler
 const uploadDir = resolve(__dirname, '../../uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
@@ -187,8 +204,47 @@ app.put('/api/documents/mock-upload/:documentId', express.raw({ type: '*/*', lim
   fs.writeFileSync(filePath, rawBody);
   console.log(`[MockUpload] Saved upload: ${rawBody.length} bytes (${mimeType}) → ${filePath}`);
 
-  // Mark as processing and respond immediately
-  updateDocumentStore(storeKey, { ...doc, status: 'processing' });
+  let currentDoc = {
+    ...doc,
+    status: 'processing',
+    current_stage: 'upload',
+    processing_steps: normalizeDocumentProcessingSteps((doc as any).processing_steps ?? createDocumentProcessingSteps()),
+  } as Record<string, unknown>;
+  let activeStep = 'upload';
+
+  const persistLocalDoc = (
+    patch: Record<string, unknown>,
+    stepUpdates: Array<{
+      id: string;
+      status: 'pending' | 'in_progress' | 'completed' | 'failed';
+      detail?: string;
+      result?: Record<string, unknown> | string[] | string;
+    }> = [],
+  ) => {
+    let steps = normalizeDocumentProcessingSteps(currentDoc.processing_steps);
+    const now = new Date().toISOString();
+    for (const stepUpdate of stepUpdates) {
+      steps = updateDocumentProcessingStep(
+        steps,
+        stepUpdate.id,
+        {
+          status: stepUpdate.status,
+          ...(stepUpdate.detail !== undefined ? { detail: stepUpdate.detail } : {}),
+          ...(stepUpdate.result !== undefined ? { result: stepUpdate.result } : {}),
+        },
+        now,
+      );
+    }
+
+    currentDoc = {
+      ...currentDoc,
+      ...patch,
+      processing_steps: steps,
+    };
+    updateDocumentStore(storeKey, currentDoc);
+  };
+
+  persistLocalDoc({ status: 'processing', current_stage: 'upload' });
   res.status(200).send();
 
   const docType = String(doc.document_type || 'document');
@@ -201,11 +257,39 @@ app.put('/api/documents/mock-upload/:documentId', express.raw({ type: '*/*', lim
     console.log(`[DocVerify] Processing ${docType}, mimeType=${mimeType}, size=${fileBytes.length} bytes`);
 
     // ── Convert ALL files to image bytes for vision OCR ──
+    activeStep = 'file_validation';
+    persistLocalDoc(
+      { current_stage: 'file_validation' },
+      [
+        {
+          id: 'upload',
+          status: 'completed',
+          detail: 'File uploaded and queued for the local AI pipeline.',
+          result: { documentType: docType },
+        },
+        {
+          id: 'file_validation',
+          status: 'in_progress',
+          detail: 'Checking file format and readability.',
+        },
+      ],
+    );
+
     let imageBuffers: Buffer[] = [];
+    let imageFormat: 'png' | 'jpeg' | 'gif' | 'webp' = 'jpeg';
 
     if (isImage) {
       imageBuffers = [Buffer.from(fileBytes)];
-      console.log(`[DocVerify] Image file ready: ${imageBuffers[0].length} bytes`);
+      if (mimeType === 'image/png' || filePath.endsWith('.png')) {
+        imageFormat = 'png';
+      } else if (mimeType === 'image/webp' || filePath.endsWith('.webp')) {
+        imageFormat = 'webp';
+      } else if (mimeType === 'image/gif' || filePath.endsWith('.gif')) {
+        imageFormat = 'gif';
+      } else {
+        imageFormat = 'jpeg';
+      }
+      console.log(`[DocVerify] Image file ready: ${imageBuffers[0].length} bytes (format: ${imageFormat})`);
     } else if (isPdf) {
       // Convert PDF pages to PNG images using pdf-to-img
       try {
@@ -240,15 +324,43 @@ app.put('/api/documents/mock-upload/:documentId', express.raw({ type: '*/*', lim
       throw new Error(`Cannot process file type: ${mimeType}. Please upload a JPG, PNG, or PDF.`);
     }
 
+    activeStep = 'text_extraction';
+    persistLocalDoc(
+      { current_stage: 'text_extraction' },
+      [
+        {
+          id: 'file_validation',
+          status: 'completed',
+          detail: 'File validated and ready for OCR.',
+          result: {
+            mimeType,
+            fileSizeKb: Math.max(1, Math.round(fileBytes.length / 1024)),
+            inputMode: isPdf ? 'pdf' : 'image',
+          },
+        },
+        {
+          id: 'text_extraction',
+          status: 'in_progress',
+          detail: isPdf
+            ? 'Extracting text from the PDF for OCR.'
+            : 'Preparing the image for OCR and field extraction.',
+        },
+      ],
+    );
+
     // ── Build the OCR prompt ──
     const docTypePrompts: Record<string, string> = {
       aadhaar: `Extract: Name, Date of Birth, Gender, Aadhaar Number (mask as XXXX-XXXX-1234), Address, Father/Husband Name if visible.`,
       pan: `Extract: Full Name, Father's Name, Date of Birth, PAN Number (mask middle 4 digits as ABCDE****F), Signature present (yes/no).`,
-      bank_passbook: `Extract: Account Holder Name, Account Number (mask as XXXXXX1234), Bank Name, Branch, IFSC Code, Account Type.`,
+      bank_passbook: `Extract: Account Holder Name, Account Number (replace all but the LAST 4 digits with X — e.g. if the document shows ...0510 then output XXXXXX0510; NEVER use 1234 or a fake suffix; use the actual last 4 digits from the document), Bank Name, Branch, IFSC Code, Account Type. Bank passbooks come in many formats (savings book, statement page, bank letter, etc.). Accept any document that clearly shows bank account details.`,
       income_certificate: `Extract: Applicant Name, Annual Income (with ₹), Issuing Authority, Certificate Number, Date of Issue, Valid Until.`,
     };
 
     const fieldInstructions = docTypePrompts[docType] || `Extract all visible text fields as key-value pairs.`;
+
+    const invalidDocHint = docType === 'bank_passbook'
+      ? `Only respond INVALID_DOCUMENT if the image is clearly a different document type (Aadhaar, PAN, etc.), a blank page, or a random unrelated image. Bank passbooks come in many formats — accept any document showing bank account details.`
+      : `If NOT (wrong document, random photo, blank page), respond with exactly: INVALID_DOCUMENT`;
 
     const prompt = `You are an expert Indian government document OCR engine for VaaniSetu. Your ONLY job is to extract text with 100% molecular precision.
 
@@ -258,7 +370,7 @@ CRITICAL OCR RULES for MAXIMUM ACCURACY:
 1. You MUST read every single character exactly as printed. DO NOT autocorrect or guess standard spellings (e.g., if it says "Gaveesha", do NOT output "Gavveesha"). Pay extreme attention to double letters.
 2. Verify names and spellings TWO TIMES before outputting. Look closely at the image crops.
 3. This document may be LOW QUALITY — blurry, tilted, compressed, photographed with a basic phone camera. Try your HARDEST to read every character accurately.
-4. First verify: Is this actually a "${docType}"? If NOT (wrong document, random photo, blank page), respond with exactly: INVALID_DOCUMENT
+4. First verify: Is this actually a "${docType}"? ${invalidDocHint}
 5. If it IS a valid "${docType}", extract ALL information precisely as described below.
 6. Return ONLY a flat JSON object with string values. NO nested objects. NO arrays. NO markdown code fences.
 7. Use human-readable key names like "Full Name", "Date Of Birth", "PAN Number".
@@ -279,12 +391,12 @@ If the document is not a valid "${docType}", respond with exactly: INVALID_DOCUM
     if (imageBuffers.length > 0) {
       // Send first page image to vision model
       contentBlocks.push({
-        image: { format: 'png' as any, source: { bytes: imageBuffers[0] } }
+        image: { format: imageFormat, source: { bytes: imageBuffers[0] } }
       });
-      // If there's a second page, send it too
+      // If there's a second page, send it too (PDF pages are always PNG)
       if (imageBuffers.length > 1) {
         contentBlocks.push({
-          image: { format: 'png' as any, source: { bytes: imageBuffers[1] } }
+          image: { format: isPdf ? 'png' : imageFormat, source: { bytes: imageBuffers[1] } }
         });
       }
     } else if ((req as any).__pdfText) {
@@ -293,6 +405,28 @@ If the document is not a valid "${docType}", respond with exactly: INVALID_DOCUM
         text: `${prompt}\n\nExtracted text from the PDF:\n---\n${(req as any).__pdfText}\n---\n\nBased on this text, provide the JSON response.`
       };
     }
+
+    activeStep = 'field_structuring';
+    persistLocalDoc(
+      { current_stage: 'field_structuring' },
+      [
+        {
+          id: 'text_extraction',
+          status: 'completed',
+          detail: 'OCR completed and content is ready for structuring.',
+          result: {
+            extractionMethod: isPdf ? 'pdf_text_fallback' : 'nova_vision',
+            pagesAnalyzed: Math.max(imageBuffers.length, isPdf ? 1 : 0),
+            extractedCharacters: typeof (req as any).__pdfText === 'string' ? (req as any).__pdfText.length : undefined,
+          },
+        },
+        {
+          id: 'field_structuring',
+          status: 'in_progress',
+          detail: 'Nova Pro is organizing the detected content into fields.',
+        },
+      ],
+    );
 
     console.log(`[DocVerify] Sending to Bedrock Nova Pro (${contentBlocks.length} content blocks)...`);
 
@@ -312,12 +446,7 @@ If the document is not a valid "${docType}", respond with exactly: INVALID_DOCUM
     console.log(`[DocVerify] AI Response for ${docType}:`, resultText);
 
     if (resultText === 'INVALID_DOCUMENT' || (resultText.toLowerCase().includes('invalid_document') && !resultText.includes('{'))) {
-      updateDocumentStore(storeKey, {
-        ...doc,
-        status: 'failed',
-        error_message: `This does not appear to be a valid ${docType}. Please upload the correct document.`,
-        processed_at: new Date().toISOString()
-      });
+      throw new Error(`This does not appear to be a valid ${docType}. Please upload the correct document.`);
     } else {
       let structuredData: any = {};
       try {
@@ -354,21 +483,79 @@ If the document is not a valid "${docType}", respond with exactly: INVALID_DOCUM
 
       console.log(`[DocVerify] Extracted fields:`, Object.keys(structuredData));
 
-      updateDocumentStore(storeKey, {
-        ...doc,
-        status: 'processed',
-        structured_data: structuredData,
-        processed_at: new Date().toISOString()
-      });
+      activeStep = 'verification';
+      persistLocalDoc(
+        { current_stage: 'verification' },
+        [
+          {
+            id: 'field_structuring',
+            status: 'completed',
+            detail: `Structured ${Object.keys(structuredData).length} fields from the document.`,
+            result: {
+              fieldCount: Object.keys(structuredData).length,
+              extractedFields: Object.keys(structuredData).slice(0, 8),
+            },
+          },
+          {
+            id: 'verification',
+            status: 'in_progress',
+            detail: 'Publishing the verified result.',
+          },
+        ],
+      );
+
+      const replacedDocumentId = String(currentDoc.replaces_document_id ?? '');
+      if (replacedDocumentId) {
+        for (const [existingKey, value] of store.entries()) {
+          if (value.document_id === replacedDocumentId) {
+            updateDocumentStore(existingKey, {
+              ...value,
+              is_current: false,
+              superseded_at: new Date().toISOString(),
+            });
+            break;
+          }
+        }
+      }
+
+      persistLocalDoc(
+        {
+          status: 'processed',
+          current_stage: 'completed',
+          structured_data: structuredData,
+          is_current: true,
+          processed_at: new Date().toISOString()
+        },
+        [
+          {
+            id: 'verification',
+            status: 'completed',
+            detail: 'Document verified successfully and ready to use.',
+            result: {
+              verifiedFields: Object.keys(structuredData).length,
+            },
+          },
+        ],
+      );
     }
   } catch (err: any) {
     console.error('[DocVerify] FAILED:', err.message);
-    updateDocumentStore(storeKey, {
-      ...doc,
-      status: 'failed',
-      error_message: `Verification failed: ${err.message}`,
-      processed_at: new Date().toISOString()
-    });
+    persistLocalDoc(
+      {
+        status: 'failed',
+        current_stage: 'failed',
+        error_message: `Verification failed: ${err.message}`,
+        processed_at: new Date().toISOString()
+      },
+      [
+        {
+          id: activeStep,
+          status: 'failed',
+          detail: err.message,
+          result: { error: err.message },
+        },
+      ],
+    );
   }
 });
 
@@ -396,6 +583,16 @@ app.post('/api/voice/query', async (req, res) => {
   try {
     const event = toApiGatewayEvent(req);
     const result = await voiceQueryHandler(event as never, {} as never, () => { }) as { statusCode: number; headers?: Record<string, string>; body: string };
+    sendLambdaResponse(res, result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
+
+app.post('/api/telegram/webhook', async (req, res) => {
+  try {
+    const event = toApiGatewayEvent(req);
+    const result = await telegramWebhookHandler(event as never, {} as never, () => { }) as { statusCode: number; headers?: Record<string, string>; body: string };
     sendLambdaResponse(res, result);
   } catch (err) {
     res.status(500).json({ success: false, error: String(err) });

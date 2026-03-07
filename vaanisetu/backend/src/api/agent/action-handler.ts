@@ -10,24 +10,9 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from '../../utils/logger.js';
 import { evaluateEligibility } from '../../services/scheme-eligibility-service.js';
-import { createRequire } from 'module';
-
-// These JSON imports are bundled inline by esbuild — no runtime file I/O needed
-const _require = createRequire(import.meta.url);
-const LOCAL_SCHEMES_DATA: any[] = (() => {
-    try {
-        return _require('../../../../data/schemes/central-schemes.json');
-    } catch {
-        return [];
-    }
-})();
-const LOCAL_JOBS_DATA: any[] = (() => {
-    try {
-        return _require('../../../../data/jobs/sample-jobs.json');
-    } catch {
-        return [];
-    }
-})();
+import { getCurrentDocumentsByType } from '../../utils/document-selection.js';
+import LOCAL_SCHEMES_DATA from '../../../../data/schemes/central-schemes.json';
+import LOCAL_JOBS_DATA from '../../../../data/jobs/sample-jobs.json';
 
 const rds = new RDSDataClient({ region: process.env.REGION || 'ap-south-1' });
 const dynamo = DynamoDBDocumentClient.from(
@@ -39,6 +24,7 @@ const DOCUMENTS_TABLE = process.env.DOCUMENTS_TABLE || 'vaanisetu-documents';
 const CONFIRM_SECRET = process.env.APPLICATION_CONFIRMATION_SECRET || 'vaanisetu-confirm-secret';
 const CONFIRM_TTL_SEC = Number(process.env.APPLICATION_CONFIRMATION_TTL_SEC || 900);
 const ALLOW_LOCAL_DATA_FALLBACK = process.env.ALLOW_LOCAL_DATA_FALLBACK === 'true';
+const INLINE_UPLOADABLE_DOCUMENTS = new Set(['aadhaar', 'pan', 'bank_passbook', 'income']);
 
 type SchemeLite = {
     id: string;
@@ -113,14 +99,49 @@ function scoreSchemeQuery(s: SchemeLite, query: string): number {
     const hi = normalizeText(s.nameHi);
     const qCompact = compact(q);
     let score = 0;
+
+    // Exact full match
     if (q === id || q === code || q === en || q === hi) score += 140;
+    // Compact (no-space) exactly equal
     if (qCompact === compact(id) || qCompact === compact(code) || qCompact === compact(en)) score += 120;
-    if (id.includes(q) || code.includes(q) || en.includes(q) || hi.includes(q)) score += 70;
-    for (const token of q.split(' ').filter(Boolean)) {
+    // Query contains full scheme name (e.g. "3. National Scholarship Portal with a benefit of up to ₹1,00,000")
+    if (en.length >= 5 && q.includes(en)) score += 95;
+    if (hi.length >= 5 && q.includes(hi)) score += 85;
+    // Substring inclusion (scheme name contains query)
+    if (id.includes(q) || code.includes(q)) score += 75;
+    if (en.includes(q)) score += 70;
+    if (hi.includes(q)) score += 60;
+
+    // Per-token scoring
+    const qTokens = q.split(' ').filter(Boolean);
+    const enTokens = en.split(' ').filter(Boolean);
+    for (const token of qTokens) {
+        if (token.length < 2) continue; // skip single-char noise
         if (id.includes(token)) score += 12;
         if (code.includes(token)) score += 12;
         if (en.includes(token) || hi.includes(token)) score += 10;
     }
+
+    // COVERAGE BONUS: if the query tokens cover >= 60% of the scheme's English name tokens,
+    // it's likely a match for that scheme specifically. Boost it significantly.
+    if (enTokens.length > 0 && qTokens.length > 0) {
+        const matchedSchemeTokens = enTokens.filter((et) =>
+            qTokens.some((qt) => qt.length >= 3 && (et.includes(qt) || qt.includes(et)))
+        ).length;
+        const coverage = matchedSchemeTokens / enTokens.length;
+        if (coverage >= 0.7) score += 65;
+        else if (coverage >= 0.5) score += 35;
+        else if (coverage >= 0.35) score += 15;
+
+        // Also check reverse: how much of the QUERY does the scheme name cover?
+        const matchedQueryTokens = qTokens.filter((qt) =>
+            qt.length >= 3 && enTokens.some((et) => et.includes(qt) || qt.includes(et))
+        ).length;
+        const queryCoverage = matchedQueryTokens / qTokens.length;
+        if (queryCoverage >= 0.7) score += 40;
+        else if (queryCoverage >= 0.5) score += 20;
+    }
+
     return score;
 }
 
@@ -139,6 +160,7 @@ function canonicalDocTag(name: string): string {
         aadhaar_number: 'aadhaar',
         pan_number: 'pan',
         bank_pass_book: 'bank_passbook',
+        bank_account: 'bank_passbook',
         passbook: 'bank_passbook',
         domicile: 'domicile',
         residence: 'residence',
@@ -249,10 +271,21 @@ function resolveSchemesTop3(schemes: SchemeLite[], query: string): { code: ToolR
         .filter((x) => x.score > 0)
         .sort((a, b) => b.score - a.score);
     if (!ranked.length) return { code: 'NOT_FOUND' };
-    if (ranked[0].score >= 130 || (ranked[1]?.score ?? 0) + 18 <= ranked[0].score) {
+    const topScore = ranked[0].score;
+    const secondScore = ranked[1]?.score ?? 0;
+    // Return OK if: score is high enough AND clearly better than 2nd place
+    if (topScore >= 70 && (secondScore + 25 <= topScore || topScore >= 130)) {
         return { code: 'OK', best: ranked[0].s };
     }
-    return { code: 'AMBIGUOUS_TOP3', top3: ranked.slice(0, 3).map((x) => x.s) };
+    // If multiple high scorers within 25 pts, ask user to disambiguate
+    if (ranked.filter((x) => x.score >= 40).length >= 2) {
+        return { code: 'AMBIGUOUS_TOP3', top3: ranked.slice(0, 3).map((x) => x.s) };
+    }
+    // Only one hit above threshold — return it
+    if (topScore >= 40) {
+        return { code: 'OK', best: ranked[0].s };
+    }
+    return { code: 'NOT_FOUND' };
 }
 
 async function getProfileAndDocumentSummary(userId: string) {
@@ -270,17 +303,13 @@ async function getProfileAndDocumentSummary(userId: string) {
 
     const profile = (userRes.Item ?? {}) as Record<string, any>;
     const docs = (docRes.Items ?? []) as Record<string, any>[];
-    const byType = new Map<string, Record<string, any>>();
-    for (const d of docs) {
-        const t = String(d.document_type || d.documentType || 'unknown');
-        if (!byType.has(t)) byType.set(t, d);
-    }
-    const summary = Array.from(byType.values()).map((d) => ({
+    const currentByType = getCurrentDocumentsByType(docs);
+    const summary = Array.from(currentByType.values()).map((d) => ({
         documentType: String(d.document_type || d.documentType || 'unknown'),
         status: String(d.status || 'unknown'),
     }));
     const providedDocTypes = summary
-        .filter((d) => ['uploaded', 'processing', 'processed', 'verified', 'approved'].includes(normalizeText(d.status)))
+        .filter((d) => ['processed', 'verified', 'approved', 'completed'].includes(normalizeText(d.status)))
         .map((d) => canonicalDocTag(d.documentType));
     return { profile, documentSummary: summary, providedDocTypes };
 }
@@ -321,6 +350,7 @@ export async function executeAgentAction(event: any): Promise<Record<string, any
                 const { profile, documentSummary, providedDocTypes } = await getProfileAndDocumentSummary(effectiveUserId);
                 const required = (resolved.best.documentsRequired || []).map((d) => normalizeRequiredDoc(d));
                 const missingDocuments = required.filter((req) => !providedDocTypes.some((p) => docsMatch(req, p)));
+                const availableDocuments = required.filter((req) => providedDocTypes.some((p) => docsMatch(req, p)));
                 const confirmationToken = makeConfirmationToken(effectiveUserId, resolved.best.id);
 
                 return withToolMeta({
@@ -331,6 +361,7 @@ export async function executeAgentAction(event: any): Promise<Record<string, any
                     userProfile: profile,
                     documents: documentSummary,
                     missingDocuments,
+                    availableDocuments,
                     confirmationToken,
                     expiresInSeconds: Math.max(120, CONFIRM_TTL_SEC),
                 });
@@ -389,9 +420,24 @@ export async function executeAgentAction(event: any): Promise<Record<string, any
                 const { profile, documentSummary, providedDocTypes } = await getProfileAndDocumentSummary(effectiveUserId);
                 const required = (selected.documentsRequired || []).map((d) => normalizeRequiredDoc(d));
                 const missingDocuments = required.filter((req) => !providedDocTypes.some((p) => docsMatch(req, p)));
+                const uploadableMissingDocuments = missingDocuments.filter((req) => INLINE_UPLOADABLE_DOCUMENTS.has(canonicalDocTag(req)));
+                const manualMissingDocuments = missingDocuments.filter((req) => !INLINE_UPLOADABLE_DOCUMENTS.has(canonicalDocTag(req)));
+
+                if (uploadableMissingDocuments.length > 0) {
+                    return withToolMeta({
+                        success: false,
+                        code: 'MISSING_DOCUMENTS',
+                        message: `Please upload all required documents before submitting. Missing: ${uploadableMissingDocuments.join(', ')}.`,
+                        missingDocuments: uploadableMissingDocuments,
+                        additionalDocuments: manualMissingDocuments,
+                        schemeId: selected.id,
+                        schemeName: selected.nameEn,
+                    });
+                }
 
                 const applicationId = toAppId();
                 const now = new Date().toISOString();
+                const applicationStatus = manualMissingDocuments.length > 0 ? 'pending_documents' : 'submitted';
                 await dynamo.send(new PutCommand({
                     TableName: APPLICATIONS_TABLE,
                     Item: {
@@ -400,17 +446,29 @@ export async function executeAgentAction(event: any): Promise<Record<string, any
                         scheme_id: selected.id,
                         scheme_name: selected.nameEn,
                         scheme_code: selected.code,
-                        status: 'submitted',
+                        status: applicationStatus,
                         created_at: now,
                         updated_at: now,
                         source: 'agent_workflow',
                         idempotency_key: idempotencyKey || null,
-                        missing_documents: missingDocuments,
+                        missing_documents: manualMissingDocuments,
                         profile_snapshot: profile,
                         documents_snapshot: documentSummary,
                     },
                 }));
-                return withToolMeta({ success: true, code: 'OK', applicationId, schemeId: selected.id, schemeCode: selected.code, schemeName: selected.nameEn, status: 'submitted', missingDocuments, message: `Application submitted for ${selected.nameEn}. Reference: ${applicationId}. Keep this number for tracking.` });
+                return withToolMeta({
+                    success: true,
+                    code: 'OK',
+                    applicationId,
+                    schemeId: selected.id,
+                    schemeCode: selected.code,
+                    schemeName: selected.nameEn,
+                    status: applicationStatus,
+                    missingDocuments: manualMissingDocuments,
+                    message: manualMissingDocuments.length > 0
+                        ? `Application created for ${selected.nameEn}. Reference: ${applicationId}. Additional documents still needed: ${manualMissingDocuments.join(', ')}.`
+                        : `Application submitted for ${selected.nameEn}. Reference: ${applicationId}. Keep this number for tracking.`,
+                });
             }
 
             case 'createApplication': {
@@ -636,9 +694,11 @@ export async function executeAgentAction(event: any): Promise<Record<string, any
                     Limit: 100,
                 })).catch(() => ({ Items: [] } as any));
                 const items = (q.Items ?? []) as Record<string, any>[];
+                const jobStatus = (x: Record<string, any>) =>
+                    (x.application_type === 'job' && x.status === 'interested') ? 'submitted' : (x.status || 'submitted');
                 const summary = {
                     total: items.length,
-                    submitted: items.filter((x) => x.status === 'submitted').length,
+                    submitted: items.filter((x) => jobStatus(x) === 'submitted').length,
                     pending: items.filter((x) => x.status === 'pending').length,
                     approved: items.filter((x) => x.status === 'approved').length,
                     rejected: items.filter((x) => x.status === 'rejected').length,
@@ -652,7 +712,10 @@ export async function executeAgentAction(event: any): Promise<Record<string, any
                         schemeId: x.scheme_id,
                         schemeCode: x.scheme_code,
                         schemeName: x.scheme_name,
-                        status: x.status,
+                        jobId: x.job_id,
+                        jobTitle: x.job_title,
+                        company: x.company,
+                        status: jobStatus(x),
                         createdAt: x.created_at,
                     })),
                 });
@@ -707,6 +770,82 @@ export async function executeAgentAction(event: any): Promise<Record<string, any
                 });
                 const out = (filtered.length ? filtered : jobs).slice(0, 8);
                 return withToolMeta({ success: true, code: 'OK', jobs: out, totalFound: out.length });
+            }
+
+            case 'createJobApplication': {
+                if (!effectiveUserId) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'Please login and try again.' });
+                const jobId = String(getParam('jobId') || '').trim();
+                const jobTitle = String(getParam('jobTitle') || '').trim();
+                const company = String(getParam('company') || '').trim();
+                if (!jobId && !jobTitle) return withToolMeta({ success: false, code: 'VALIDATION_ERROR', message: 'jobId or jobTitle is required.' });
+
+                const existingRes = await dynamo.send(new QueryCommand({
+                    TableName: APPLICATIONS_TABLE,
+                    KeyConditionExpression: 'user_id = :uid',
+                    ExpressionAttributeValues: { ':uid': effectiveUserId },
+                    Limit: 100,
+                })).catch(() => ({ Items: [] } as any));
+                const existing = (existingRes.Items ?? []).find((i: any) => {
+                    if (jobId) return String(i.job_id || '') === jobId;
+                    if (jobTitle) return String(i.job_title || '') === jobTitle;
+                    return false;
+                });
+                if (existing) {
+                    return withToolMeta({
+                        success: false,
+                        code: 'ALREADY_APPLIED',
+                        applicationId: existing.application_id,
+                        message: 'You have already applied for this job.',
+                    });
+                }
+
+                const profileRes = await dynamo.send(new GetCommand({
+                    TableName: USERS_TABLE,
+                    Key: { user_id: effectiveUserId },
+                })).catch(() => ({ Item: {} } as any));
+                const profile = (profileRes.Item ?? {}) as Record<string, unknown>;
+                const state = String(profile.state ?? (profile as any).State ?? '').trim();
+                const occupation = String(profile.occupation ?? (profile as any).Occupation ?? '').trim();
+                if (!state || !occupation) {
+                    return withToolMeta({
+                        success: false,
+                        code: 'VALIDATION_ERROR',
+                        message: 'Please complete your profile (state, occupation) before applying for jobs.',
+                    });
+                }
+
+                const now = new Date().toISOString();
+                const applicationId = `JOB-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+                await dynamo.send(new PutCommand({
+                    TableName: APPLICATIONS_TABLE,
+                    Item: {
+                        user_id: effectiveUserId,
+                        application_id: applicationId,
+                        application_type: 'job',
+                        job_id: jobId || null,
+                        job_title: jobTitle || null,
+                        company: company || null,
+                        scheme_id: '',
+                        scheme_name: jobTitle || company || 'Job application',
+                        scheme_code: jobId || '',
+                        status: 'submitted',
+                        created_at: now,
+                        updated_at: now,
+                        source: 'agent',
+                        idempotency_key: null,
+                        missing_documents: [],
+                        profile_snapshot: profile,
+                        documents_snapshot: [],
+                    },
+                }));
+
+                return withToolMeta({
+                    success: true,
+                    code: 'OK',
+                    applicationId,
+                    status: 'submitted',
+                    message: `Job application created for ${jobTitle || company || 'this job'}. Reference: ${applicationId}.`,
+                });
             }
 
             default:

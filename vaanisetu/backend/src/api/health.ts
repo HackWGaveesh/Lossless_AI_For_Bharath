@@ -1,4 +1,4 @@
-﻿import type { APIGatewayProxyHandler } from 'aws-lambda';
+import type { APIGatewayProxyHandler } from 'aws-lambda';
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
 import { DynamoDBClient, DescribeTableCommand } from '@aws-sdk/client-dynamodb';
 import { logger } from '../utils/logger.js';
@@ -60,6 +60,7 @@ export const handler: APIGatewayProxyHandler = async () => {
       'submitApplication',
       'getApplicationStatus',
       'getJobsByProfile',
+      'createJobApplication',
       'updateUserProfile',
       'updateUserProfilePatch',
       'setPreferredLanguage',

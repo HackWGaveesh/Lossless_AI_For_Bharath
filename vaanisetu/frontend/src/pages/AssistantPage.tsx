@@ -2,8 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import { Mic, MicOff, Send, Globe, Clock, Database, Cpu, CheckCircle, AlertCircle, Loader } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import Button from '../components/Common/Button';
+import DocumentProcessingTimeline from '../components/Documents/DocumentProcessingTimeline';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAssistantConversation, LANG_MAP } from '../hooks/useAssistantConversation';
+import { useAuth } from '../contexts/AuthContext';
+import { requestDocumentUpload, getDocumentStatus } from '../services/api';
+import type { DocumentProcessingStep } from '../services/api';
 
 type SupportedLang = 'en' | 'hi' | 'ta' | 'te' | 'mr' | 'kn';
 
@@ -24,6 +28,167 @@ const QUICK_PROMPTS: Record<SupportedLang, string[]> = {
   mr: ['नमस्कार', 'योजना दाखवा', 'नोकरी शोधा', 'अर्ज स्थिती'],
   kn: ['ನಮಸ್ಕಾರ', 'ಯೋಜನೆಗಳು', 'ಉದ್ಯೋಗ ಹುಡುಕಿ', 'ಅರ್ಜಿ ಸ್ಥಿತಿ'],
 };
+
+function InlineDocumentUpload({ documentType }: { documentType: string }) {
+  const { user } = useAuth();
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [status, setStatus] = useState<'idle' | 'processing' | 'processed' | 'failed'>('idle');
+  const [errorMsg, setErrorMsg] = useState('');
+  const [processingSteps, setProcessingSteps] = useState<DocumentProcessingStep[]>([]);
+  const [structuredData, setStructuredData] = useState<Record<string, unknown> | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      setUploading(true);
+      setUploadProgress(0);
+      setStatus('idle');
+      setErrorMsg('');
+      setProcessingSteps([]);
+      setStructuredData(null);
+
+      const userId = user?.id ?? 'demo-user-1';
+      const res = await requestDocumentUpload({
+        userId,
+        documentType: documentType as any,
+        fileName: file.name,
+        contentType: file.type,
+      });
+      const payload = (res as any)?.data;
+      const uploadUrl = payload?.uploadUrl;
+      const documentId = payload?.documentId;
+      if (!uploadUrl || !documentId) throw new Error('Upload failed to initialize');
+
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.upload.addEventListener('progress', (e) => {
+          if (e.lengthComputable && mountedRef.current) setUploadProgress(Math.round((e.loaded / e.total) * 100));
+        });
+        xhr.addEventListener('load', () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error('Upload failed'))));
+        xhr.addEventListener('error', () => reject(new Error('Upload failed')));
+        xhr.open('PUT', uploadUrl);
+        xhr.setRequestHeader('Content-Type', file.type);
+        xhr.send(file);
+      });
+
+      if (!mountedRef.current) return;
+      setStatus('processing');
+      setUploadProgress(100);
+
+      const pollStart = Date.now();
+      const poll = async () => {
+        for (; ;) {
+          await new Promise((r) => setTimeout(r, 4000));
+          if (!mountedRef.current) break;
+          if (Date.now() - pollStart >= 90000) {
+            setStatus('failed');
+            setErrorMsg('Timeout waiting for AI verification.');
+            break;
+          }
+          try {
+            const statusRes = await getDocumentStatus(documentId);
+            const docStatus = statusRes.data?.status;
+            if (mountedRef.current) {
+              setProcessingSteps(statusRes.data?.processing_steps ?? []);
+              setStructuredData((statusRes.data?.structured_data as Record<string, unknown> | undefined) ?? null);
+            }
+            if (docStatus === 'processed') {
+              setStatus('processed');
+              break;
+            } else if (docStatus === 'failed') {
+              setStatus('failed');
+              setErrorMsg(statusRes.data?.error_message || 'AI verification failed.');
+              break;
+            }
+          } catch {
+            // ignore network errors during poll
+          }
+        }
+      };
+      poll();
+    } catch (err: any) {
+      console.error(err);
+      if (mountedRef.current) {
+        setStatus('failed');
+        setErrorMsg(err.message || 'Upload failed');
+      }
+    } finally {
+      if (mountedRef.current) setUploading(false);
+    }
+    e.target.value = '';
+  };
+
+  return (
+    <div className="mt-2">
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".jpg,.jpeg,.png,.pdf"
+        className="hidden"
+        onChange={handleFileChange}
+      />
+      {status === 'idle' && !uploading && (
+        <button
+          onClick={() => inputRef.current?.click()}
+          className="inline-flex text-xs rounded border border-orange-300 px-3 py-1.5 bg-white text-orange-800 hover:bg-orange-100 font-medium"
+        >
+          Upload Document Now
+        </button>
+      )}
+      {uploading && (
+        <div className="w-full max-w-xs mt-1">
+          <div className="text-xs text-orange-700 mb-1">Uploading... {uploadProgress}%</div>
+          <div className="h-1.5 bg-orange-200 rounded-full overflow-hidden">
+            <div className="h-full bg-orange-500 transition-all duration-300" style={{ width: `${uploadProgress}%` }} />
+          </div>
+        </div>
+      )}
+      {status === 'processing' && (
+        <div className="mt-2 space-y-2">
+          <div className="text-xs text-blue-700 flex items-center gap-1.5 bg-blue-50 p-1.5 rounded border border-blue-200 inline-flex">
+            <div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+            AI is verifying document...
+          </div>
+          <DocumentProcessingTimeline steps={processingSteps} compact />
+        </div>
+      )}
+      {status === 'processed' && (
+        <div className="mt-2 space-y-2">
+          <div className="text-xs text-green-700 flex items-center gap-1.5 bg-green-50 p-1.5 rounded border border-green-200 inline-flex font-medium">
+            <CheckCircle className="w-3.5 h-3.5" />
+            Verified successfully!
+          </div>
+          <DocumentProcessingTimeline steps={processingSteps} compact />
+          {structuredData && Object.keys(structuredData).length > 0 ? (
+            <div className="rounded-lg border border-green-100 bg-white px-2.5 py-2 text-[11px] text-text-primary">
+              {Object.entries(structuredData).slice(0, 4).map(([key, value]) => (
+                <div key={key} className="mb-1 last:mb-0">
+                  <span className="font-semibold">{key}:</span> {String(value)}
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      )}
+      {status === 'failed' && (
+        <div className="text-xs text-red-700 mt-1 bg-red-50 p-1.5 rounded border border-red-200">
+          <div className="flex items-center gap-1 font-medium mb-1"><AlertCircle className="w-3.5 h-3.5" /> Verification failed</div>
+          <div>{errorMsg}</div>
+          <button onClick={() => inputRef.current?.click()} className="mt-1 underline">Try again</button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function AssistantPage() {
   const { language, t, setLanguage } = useLanguage();
@@ -126,11 +291,34 @@ export default function AssistantPage() {
       );
     }
     if (type === 'job_card') {
+      const jobId = card.jobId;
       return (
-        <div key={`card-${idx}`} className="rounded-lg border border-surface-border bg-surface-bg p-3 text-sm">
+        <div key={`card-${idx}`} className="rounded-lg border border-surface-border bg-surface-bg p-3 text-sm space-y-2">
           <div className="font-semibold text-text-primary">{card.title}</div>
           <div className="text-text-secondary">{card.company} - {card.state}</div>
           {card.salaryRange ? <div className="text-primary-600">{card.salaryRange}</div> : null}
+          {jobId ? (
+            <button
+              onClick={() => void sendMessage(`apply for job ${jobId}`)}
+              className="mt-2 text-xs font-medium rounded border border-primary-500 px-3 py-1.5 text-primary-600 hover:bg-primary-50 transition-colors"
+            >
+              Apply
+            </button>
+          ) : null}
+        </div>
+      );
+    }
+    if (type === 'job_confirm') {
+      const job = (card.job || {}) as Record<string, unknown>;
+      const title = card.title ?? job.title ?? 'this job';
+      const company = card.company ?? job.company ?? '';
+      return (
+        <div key={`card-${idx}`} className="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-2 text-sm">
+          <div className="font-semibold text-amber-800 flex items-center gap-2">
+            <span>Job Application</span>
+          </div>
+          <div className="font-medium text-text-primary">{title} at {company}</div>
+          <p className="text-xs text-amber-600 italic">Say &quot;Yes&quot;, &quot;Confirm&quot;, or &quot;Haan&quot; by voice or type to proceed</p>
         </div>
       );
     }
@@ -186,10 +374,8 @@ export default function AssistantPage() {
       return (
         <div key={`card-${idx}`} className="rounded-lg border border-orange-200 bg-orange-50 p-3 text-sm">
           <div className="font-semibold text-orange-800">Document required</div>
-          <div className="text-orange-700">{String(card.documentType || 'document')}</div>
-          <Link to={String(card.openPage || '/documents')} className="inline-flex mt-2 text-xs rounded border border-orange-300 px-2 py-1 bg-white text-orange-800">
-            Upload Document
-          </Link>
+          <div className="text-orange-700 mb-1">{String(card.documentType || 'document')}</div>
+          <InlineDocumentUpload documentType={String(card.documentType || 'document')} />
         </div>
       );
     }
@@ -249,6 +435,7 @@ export default function AssistantPage() {
     if (type === 'application_confirm') {
       const scheme = (card.scheme || {}) as Record<string, any>;
       const missingDocs = Array.isArray(card.missingDocuments) ? card.missingDocuments as string[] : [];
+      const availableDocs = Array.isArray(card.availableDocuments) ? card.availableDocuments as string[] : [];
       return (
         <div key={`card-${idx}`} className="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-2 text-sm">
           <div className="font-semibold text-amber-800 flex items-center gap-2">
@@ -259,10 +446,15 @@ export default function AssistantPage() {
           {typeof scheme.benefitRs === 'number' && scheme.benefitRs > 0 ? (
             <div className="text-sm">Benefit: <span className="font-semibold text-green-700">₹{Number(scheme.benefitRs).toLocaleString('en-IN')}/year</span></div>
           ) : null}
+          {availableDocs.length > 0 ? (
+            <div className="text-xs bg-green-50 border border-green-200 rounded-lg p-2 text-green-800">
+              ✓ Using your existing document(s): {availableDocs.join(', ')} for this application.
+            </div>
+          ) : null}
           {missingDocs.length > 0 ? (
             <div className="text-xs bg-red-50 border border-red-200 rounded-lg p-2 text-red-700">
               ⚠️ Missing documents: {missingDocs.join(', ')}.{' '}
-              <Link to="/documents" className="underline font-medium">Upload now →</Link>
+              <span className="font-medium">Please use the upload cards below to upload them. Submit is only available once all are uploaded.</span>
             </div>
           ) : null}
           <div className="text-xs text-amber-600 italic">Say &quot;Yes&quot;, &quot;Confirm&quot;, or &quot;Haan&quot; by voice to proceed</div>
@@ -436,17 +628,23 @@ export default function AssistantPage() {
                   </span>
                 </div>
               )}
+              {Array.isArray(pendingAction?.availableDocuments) && (pendingAction.availableDocuments as string[]).length > 0 && (
+                <div className="text-xs bg-green-50 border border-green-200 rounded-lg p-2 text-green-800">
+                  ✓ Using your existing: {(pendingAction.availableDocuments as string[]).join(', ')}
+                </div>
+              )}
               {Array.isArray(pendingAction?.missingDocuments) && (pendingAction.missingDocuments as string[]).length > 0 && (
                 <div className="text-xs bg-red-50 border border-red-200 rounded-lg p-2 text-red-700">
                   ⚠️ Missing documents: {(pendingAction.missingDocuments as string[]).join(', ')}.{' '}
-                  <Link to="/documents" className="underline font-medium">Upload now →</Link>
+                  <span className="font-medium">Upload all required documents below; then Confirm & Submit will be enabled.</span>
                 </div>
               )}
               <div className="text-xs text-amber-600 italic">
-                Say "Yes", "Confirm", or "Haan" by voice to proceed
+                Say &quot;Yes&quot;, &quot;Confirm&quot;, or &quot;Haan&quot; by voice to proceed
               </div>
               <div className="flex gap-2">
                 <Button
+                  disabled={Array.isArray(pendingAction?.missingDocuments) && (pendingAction.missingDocuments as string[]).length > 0}
                   onClick={() => void sendMessage('yes confirm application', {
                     confirmationToken: (storedConfirmationToken ?? (pendingAction?.confirmationToken as string)) || undefined,
                   })}

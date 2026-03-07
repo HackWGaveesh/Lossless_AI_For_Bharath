@@ -77,7 +77,7 @@ export function useAssistantConversation(
   } = options;
 
   const queryClient = useQueryClient();
-  const sessionId = useMemo(() => getOrCreateSessionId(sessionStorageKey), [sessionStorageKey]);
+  const [sessionId, setSessionId] = useState(() => getOrCreateSessionId(sessionStorageKey));
   const messagesKey = `vaanisetu_assistant_messages_${sessionId}`;
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -127,9 +127,15 @@ export function useAssistantConversation(
     setResponseMode('workflow');
     setLastPayload(null);
     if (persistMessages) {
-      try { sessionStorage.removeItem(messagesKey); } catch { /* noop */ }
+      try {
+        sessionStorage.removeItem(messagesKey);
+        sessionStorage.removeItem(sessionStorageKey);
+      } catch { /* noop */ }
     }
-  }, [messagesKey, persistMessages]);
+    const newSessionId = `assistant-${Math.random().toString(36).slice(2, 10)}-${Date.now()}`;
+    if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(sessionStorageKey, newSessionId);
+    setSessionId(newSessionId);
+  }, [messagesKey, persistMessages, sessionStorageKey]);
 
   const sendMessage = useCallback(
     async (rawText?: string, opts?: { confirmationToken?: string | null }) => {

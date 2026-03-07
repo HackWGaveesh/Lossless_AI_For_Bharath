@@ -35,6 +35,41 @@ export interface Scheme {
   eligibilityCriteria?: Record<string, unknown>;
 }
 
+export interface DocumentProcessingStep {
+  id: string;
+  label: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  detail?: string;
+  timestamp?: string;
+  result?: Record<string, unknown> | string[] | string;
+}
+
+export interface DocumentRecord {
+  document_id?: string;
+  documentId?: string;
+  document_type?: string;
+  documentType?: string;
+  status?: string;
+  current_stage?: string;
+  currentStage?: string;
+  structured_data?: Record<string, unknown>;
+  structuredData?: Record<string, unknown>;
+  processing_steps?: DocumentProcessingStep[];
+  processingSteps?: DocumentProcessingStep[];
+  processed_at?: string;
+  processedAt?: string;
+  uploaded_at?: string;
+  uploadedAt?: string;
+  error_message?: string;
+  errorMessage?: string;
+  is_current?: boolean;
+  isCurrent?: boolean;
+  replaces_document_id?: string | null;
+  replacesDocumentId?: string | null;
+  replacement_decision?: string | null;
+  replacementDecision?: string | null;
+}
+
 export interface SchemesResponse {
   success: boolean;
   data: { schemes: Scheme[]; total: number };
@@ -45,6 +80,10 @@ export interface ApplicationItem {
   scheme_id: string;
   scheme_name?: string;
   scheme_code?: string;
+  application_type?: 'scheme' | 'job';
+  job_id?: string;
+  job_title?: string;
+  company?: string;
   status: string;
   created_at: string;
   updated_at?: string;
@@ -128,6 +167,22 @@ export async function fetchApplications(userId?: string): Promise<ApplicationIte
   }
 }
 
+export interface ApplicationDetailItem extends ApplicationItem {
+  profile_snapshot?: Record<string, unknown>;
+  documents_snapshot?: Array<{ documentType?: string; status?: string }>;
+}
+
+export async function fetchApplicationDetail(applicationId: string): Promise<ApplicationDetailItem | null> {
+  try {
+    const { data } = await api.get<{ success: boolean; data: { application?: ApplicationDetailItem } }>('/applications', {
+      params: { id: applicationId },
+    });
+    return data.data?.application ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function requestDocumentUpload(body: {
   userId: string;
   documentType: string;
@@ -145,6 +200,9 @@ export async function createApplication(body: {
   userId: string;
   schemeId?: string;
   schemeName?: string;
+  jobId?: string;
+  jobTitle?: string;
+  company?: string;
   query?: string;
   formData?: Record<string, unknown>;
   confirm?: boolean;
@@ -155,12 +213,14 @@ export async function createApplication(body: {
     success: boolean; data: {
       applicationId?: string;
       status?: string;
+      alreadyApplied?: boolean;
       needsConfirmation?: boolean;
       confirmationToken?: string | null;
       missingDocuments?: string[];
       schemeId?: string | null;
       schemeCode?: string | null;
       schemeName?: string | null;
+      applicationType?: 'scheme' | 'job';
       code?: string;
       message?: string;
     }
@@ -270,16 +330,42 @@ export async function updateProfile(profile: Record<string, unknown>) {
   return data;
 }
 
-export async function getDocumentStatus(documentId: string) {
-  const { data } = await api.get<{ success: boolean; data: { status: string; structured_data?: Record<string, unknown>; processed_at?: string; error_message?: string } }>(
-    `/documents/${documentId}/status`
+export async function getDocumentStatus(documentId: string, userId?: string) {
+  const { data } = await api.get<{ success: boolean; data: {
+    status: string;
+    current_stage?: string;
+    processing_steps?: DocumentProcessingStep[];
+    is_current?: boolean;
+    replaces_document_id?: string | null;
+    replacement_decision?: string | null;
+    structured_data?: Record<string, unknown>;
+    processed_at?: string;
+    error_message?: string;
+  } }>(
+    `/documents/${documentId}/status`,
+    {
+      params: userId ? { userId } : {},
+    }
   );
   return data;
 }
 
 export async function fetchDocuments(userId?: string) {
-  const { data } = await api.get<{ success: boolean; data: { documents: any[] } }>('/documents', {
+  const { data } = await api.get<{ success: boolean; data: { documents: DocumentRecord[] } }>('/documents', {
     params: userId ? { userId } : {},
   });
+  return data;
+}
+
+export async function resolveDocumentReplacement(documentId: string, keepPrevious: boolean) {
+  const { data } = await api.post<{ success: boolean; data: {
+    resolved: boolean;
+    keepPrevious: boolean;
+    currentDocumentId?: string | null;
+    currentDocumentStatus?: string | null;
+  } }>(
+    `/documents/${documentId}/resolve`,
+    { keepPrevious },
+  );
   return data;
 }

@@ -305,9 +305,9 @@ export default function SchemeDetailPage() {
           schemeName={scheme.nameEn ?? scheme.schemeId}
           documentsRequired={docsRequired}
           onClose={() => setShowApplyModal(false)}
-          onSuccess={() => {
+          onSuccess={(applicationId) => {
             setShowApplyModal(false);
-            navigate('/applications');
+            navigate(`/applications?id=${applicationId}`);
           }}
         />
       )}

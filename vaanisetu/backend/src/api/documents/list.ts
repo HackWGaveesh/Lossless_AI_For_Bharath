@@ -5,6 +5,7 @@ import { logger } from '../../utils/logger.js';
 import { sendSuccessResponse, sendErrorResponse } from '../../utils/responses.js';
 import { getUserIdFromEvent } from '../../utils/user-id.js';
 import { getLocalDocumentStore } from './upload.js';
+import { getCurrentDocumentsByType, normalizeDocumentType, sortDocumentsNewestFirst } from '../../utils/document-selection.js';
 
 const REGION = process.env.REGION || process.env.AWS_REGION || 'ap-south-1';
 const dynamo = new DynamoDBClient({ region: REGION });
@@ -13,24 +14,15 @@ const doc = DynamoDBDocumentClient.from(dynamo);
 const DOCUMENTS_TABLE = process.env.DOCUMENTS_TABLE ?? 'vaanisetu-documents';
 const USE_LOCAL_DOCUMENT_STORE = process.env.USE_LOCAL_DOCUMENT_STORE === 'true';
 
-function docTimestamp(item: Record<string, any>): number {
-    const processed = Date.parse(String(item.processed_at ?? item.processedAt ?? ''));
-    const uploaded = Date.parse(String(item.uploaded_at ?? item.uploadedAt ?? ''));
-    const p = Number.isNaN(processed) ? 0 : processed;
-    const u = Number.isNaN(uploaded) ? 0 : uploaded;
-    return Math.max(p, u);
-}
-
-function latestByType(items: any[]): any[] {
-    const byType = new Map<string, any>();
-    for (const item of items) {
-        const key = String(item.document_type || item.documentType || 'unknown');
-        const prev = byType.get(key);
-        if (!prev || docTimestamp(item) >= docTimestamp(prev)) {
-            byType.set(key, item);
-        }
-    }
-    return Array.from(byType.values());
+function toPublicDocument(item: Record<string, any>) {
+    return {
+        ...item,
+        current_stage: item.current_stage,
+        processing_steps: item.processing_steps,
+        is_current: item.is_current ?? false,
+        replaces_document_id: item.replaces_document_id ?? null,
+        replacement_decision: item.replacement_decision ?? null,
+    };
 }
 
 export const handler: APIGatewayProxyHandler = async (event) => {
@@ -57,13 +49,27 @@ export const handler: APIGatewayProxyHandler = async (event) => {
         }
 
         if (!USE_LOCAL_DOCUMENT_STORE) {
-            return sendSuccessResponse({ documents: latestByType(ddbDocs) });
+            const sorted = sortDocumentsNewestFirst(ddbDocs);
+            const currentMap = getCurrentDocumentsByType(sorted);
+            return sendSuccessResponse({
+                documents: sorted.map((item) => toPublicDocument({
+                    ...item,
+                    is_current: currentMap.get(normalizeDocumentType(item.document_type ?? item.documentType))?.document_id === item.document_id,
+                })),
+            });
         }
 
         const store = getLocalDocumentStore();
         const localDocs = Array.from(store.values()).filter(d => d.user_id === userId);
         const merged = [...ddbDocs, ...localDocs];
-        return sendSuccessResponse({ documents: latestByType(merged) });
+        const sorted = sortDocumentsNewestFirst(merged);
+        const currentMap = getCurrentDocumentsByType(sorted);
+        return sendSuccessResponse({
+            documents: sorted.map((item) => toPublicDocument({
+                ...item,
+                is_current: currentMap.get(normalizeDocumentType(item.document_type ?? item.documentType))?.document_id === item.document_id,
+            })),
+        });
     } catch (error) {
         logger.error('Document list error', { error });
         return sendErrorResponse(500, 'Failed to list documents');

@@ -18,7 +18,9 @@ export const handler: APIGatewayProxyHandler = async (event) => {
       return sendErrorResponse(401, 'Unauthorized');
     }
 
-    let items = [];
+    const applicationId = (event.queryStringParameters?.id ?? event.queryStringParameters?.applicationId ?? '').trim();
+
+    let items: any[] = [];
     try {
       const result = await docClient.send(new QueryCommand({
         TableName: APPLICATIONS_TABLE,
@@ -34,12 +36,44 @@ export const handler: APIGatewayProxyHandler = async (event) => {
       items = IN_MEMORY_STORE.applications[userId] ?? [];
     }
 
+    const jobDisplayStatus = (item: any) =>
+      (item.application_type === 'job' && item.status === 'interested') ? 'submitted' : (item.status ?? 'submitted');
+
+    if (applicationId) {
+      const one = items.find((i: any) => String(i.application_id) === applicationId);
+      if (!one) {
+        return sendErrorResponse(404, 'Application not found');
+      }
+      return sendSuccessResponse({
+        application: {
+          application_id: one.application_id,
+          application_type: one.application_type ?? 'scheme',
+          scheme_id: one.scheme_id,
+          scheme_name: one.scheme_name,
+          scheme_code: one.scheme_code,
+          job_id: one.job_id,
+          job_title: one.job_title,
+          company: one.company,
+          status: jobDisplayStatus(one),
+          created_at: one.created_at,
+          updated_at: one.updated_at,
+          missing_documents: one.missing_documents ?? [],
+          profile_snapshot: one.profile_snapshot ?? {},
+          documents_snapshot: one.documents_snapshot ?? [],
+        },
+      });
+    }
+
     const applications = items.map((item: any) => ({
       application_id: item.application_id,
+      application_type: item.application_type ?? 'scheme',
       scheme_id: item.scheme_id,
       scheme_name: item.scheme_name,
       scheme_code: item.scheme_code,
-      status: item.status,
+      job_id: item.job_id,
+      job_title: item.job_title,
+      company: item.company,
+      status: jobDisplayStatus(item),
       created_at: item.created_at,
       updated_at: item.updated_at,
       missing_documents: item.missing_documents ?? [],

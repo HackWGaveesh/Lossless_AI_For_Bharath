@@ -68,6 +68,7 @@ export function deriveAssistantState(args: {
   if (result === 'submitted') next = 'IDLE';
   else if (result === 'scheme_disambiguation' || pendingType === 'scheme_disambiguation') next = 'SCHEME_DISAMBIGUATION';
   else if (pendingType === 'apply_field_confirmation') next = 'APPLY_FIELD_CONFIRMATION';
+  else if (pendingType === 'job_confirm') next = 'APPLY_SUBMIT_CONFIRMATION';
   else if (
     result === 'document_requirements_missing'
     || result === 'document_upload_slot'

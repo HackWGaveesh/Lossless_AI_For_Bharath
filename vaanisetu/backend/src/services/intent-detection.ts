@@ -6,6 +6,7 @@
 export type WorkflowIntent =
   | 'greeting'
   | 'apply'
+  | 'apply_for_job'
   | 'status'
   | 'jobs'
   | 'documents'
@@ -24,8 +25,7 @@ export interface IntentResult {
 export function normalizeText(value: string): string {
   return (value || '')
     .toLowerCase()
-    .normalize('NFKD')
-    .replace(/[^\p{L}\p{N}\s-]/gu, ' ')
+    .replace(/[^\p{L}\p{N}\p{M}\s-]/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -81,14 +81,14 @@ const GREETING_PATTERNS = [
 
 export function detectWorkflowIntent(normalized: string): WorkflowIntent {
   const t = normalized.trim();
-  if (t.length <= 2) return 'none';
+  if (t.length < 2) return 'none';
 
   // Greeting: short or explicit greeting phrases (check early so "hi" doesn't fall through)
   if (t.length <= 30) {
     for (const p of GREETING_PATTERNS) {
       if (p.test(t)) return 'greeting';
     }
-    if (/^(hi|hello|hey|namaste|namaskar|greetings)$/i.test(t)) return 'greeting';
+    if (/^(hi|hello|hey|namaste|namaskar|greetings|namaskara|namaskaram)$/i.test(t)) return 'greeting';
   }
 
   const hasRef = /\bvs-[a-z0-9-]{6,}\b/i.test(normalized);
@@ -135,6 +135,11 @@ export function detectWorkflowIntent(normalized: string): WorkflowIntent {
     || /\b(nanna age)\b/i.test(normalized)
     // Marathi profile
     || /माझी माहिती|वय|राज्य|माझे वय/.test(normalized);
+
+  // APPLY FOR JOB — explicit job apply (check before generic apply)
+  const isApplyForJob = /\b(apply|aavedan)\s+(?:for\s+)?(?:this\s+)?(?:job|naukri|kaam|velai|udhyog)\b/.test(normalized)
+    || /\b(job|naukri|velai|udhyog)\s+(?:pe\s+|par\s+)?(?:apply|aavedan)\b/.test(normalized)
+    || /\b(apply|aavedan)\s+(?:for\s+)?job\s+\d+\b/.test(normalized);
 
   // APPLY — expanded with all Indian languages
   const isApply = /\b(apply|submit|register)\b/.test(normalized)
@@ -213,6 +218,7 @@ export function detectWorkflowIntent(normalized: string): WorkflowIntent {
   if (isLanguageUpdate) return 'language_update';
   if (isProfileUpdate) return 'profile_update';
   if (isExplicitConfirm) return 'apply';
+  if (isApplyForJob) return 'apply_for_job';
   if (isApply) return 'apply';
   if (isJobs) return 'jobs';
   if (isDocuments) return 'documents';

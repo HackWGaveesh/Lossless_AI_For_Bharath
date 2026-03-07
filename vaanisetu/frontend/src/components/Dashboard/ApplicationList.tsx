@@ -8,6 +8,10 @@ export interface ApplicationItem {
   scheme_id: string;
   scheme_name?: string;
   scheme_code?: string;
+  application_type?: 'scheme' | 'job';
+  job_id?: string;
+  job_title?: string;
+  company?: string;
   status: string;
   created_at: string;
   updated_at?: string;
@@ -21,15 +25,19 @@ interface ApplicationListProps {
 const statusColors: Record<string, string> = {
   submitted: 'bg-blue-100 text-blue-800',
   pending: 'bg-amber-100 text-amber-800',
+  pending_documents: 'bg-amber-100 text-amber-800',
   approved: 'bg-green-100 text-green-800',
   rejected: 'bg-red-100 text-red-800',
+  interested: 'bg-violet-100 text-violet-800',
 };
 
 const statusLabels: Record<string, string> = {
   submitted: 'applications.status_submitted',
   pending: 'applications.status_pending',
+  pending_documents: 'applications.status_pending',
   approved: 'applications.status_approved',
   rejected: 'applications.status_rejected',
+  interested: 'applications.status_pending',
 };
 
 export default function ApplicationList({ applications }: ApplicationListProps) {
@@ -63,7 +71,7 @@ export default function ApplicationList({ applications }: ApplicationListProps) 
               <tr key={app.application_id} className="hover:bg-surface-elevated">
                 <td className="px-6 py-4 flex items-center gap-2">
                   <FileText className="w-4 h-4 text-text-muted" />
-                  <span className="font-medium text-text-primary">{app.scheme_name || app.scheme_code || app.scheme_id}</span>
+                  <span className="font-medium text-text-primary">{app.job_title || app.scheme_name || app.scheme_code || app.scheme_id}</span>
                 </td>
                 <td className="px-6 py-4">
                   <span
@@ -82,7 +90,7 @@ export default function ApplicationList({ applications }: ApplicationListProps) 
                     to={`/applications?id=${app.application_id}`}
                     className="text-primary-600 hover:text-primary-700 font-medium text-sm"
                   >
-                    {t('schemes.view_details')}
+                    Track application
                   </Link>
                 </td>
               </tr>

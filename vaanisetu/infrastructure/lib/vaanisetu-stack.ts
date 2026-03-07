@@ -134,6 +134,14 @@ export class VaaniSetuStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    const telegramAuthTable = new dynamodb.Table(this, 'TelegramAuthTable', {
+      tableName: 'vaanisetu-telegram-auth',
+      partitionKey: { name: 'chat_id', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: 'ttl',
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
     // Aurora Serverless v2 (v1 engine mode is unavailable in many regions/accounts)
     const dbCluster = new rds.DatabaseCluster(this, 'VaaniSetuDB', {
       engine: rds.DatabaseClusterEngine.auroraPostgres({
@@ -207,6 +215,7 @@ export class VaaniSetuStack extends cdk.Stack {
     runtimeConfigTable.grantReadWriteData(lambdaExecutionRole);
     applicationsTable.grantReadWriteData(lambdaExecutionRole);
     documentsTable.grantReadWriteData(lambdaExecutionRole);
+    telegramAuthTable.grantReadWriteData(lambdaExecutionRole);
     documentsBucket.grantReadWrite(lambdaExecutionRole);
     dbCluster.grantDataApiAccess(lambdaExecutionRole);
 
@@ -312,7 +321,7 @@ const snsClient = new SNSClient({ region: process.env.AWS_REGION || 'ap-south-1'
 
 exports.handler = async (event) => {
   const session = event.request.session || [];
-  const phone = event.request.userAttributes?.phone_number;
+  const phone = event.request.userAttributes?.phone_number || event.request.userName;
   const testOtpEnabled = process.env.TEST_OTP_ENABLED === 'true';
   const testOtpCode = (process.env.TEST_OTP_CODE || '112233').replace(/\\D/g, '').slice(0, 6) || '112233';
   const testOtpPhones = (process.env.TEST_OTP_PHONES || '')
@@ -463,13 +472,14 @@ exports.handler = async (event) => {
       ...nodeOptions,
       entry: path.join(backendPath, 'api/documents/process.ts'),
       handler: 'handler',
-      timeout: cdk.Duration.seconds(60),
+      timeout: cdk.Duration.seconds(300),
       memorySize: 2048,
       environment: {
         ...nodeOptions.environment,
         DOCUMENTS_BUCKET: documentsBucket.bucketName,
         DOCUMENTS_TABLE: documentsTable.tableName,
         BEDROCK_AGENT_ID: process.env.BEDROCK_AGENT_ID || '',
+        BEDROCK_REGION: 'us-east-1',
       },
     });
 
@@ -485,6 +495,16 @@ exports.handler = async (event) => {
     const documentListFn = new lambdaNode.NodejsFunction(this, 'DocumentListFunction', {
       ...nodeOptions,
       entry: path.join(backendPath, 'api/documents/list.ts'),
+      handler: 'handler',
+      environment: {
+        ...nodeOptions.environment,
+        DOCUMENTS_TABLE: documentsTable.tableName,
+      },
+    });
+
+    const documentResolveFn = new lambdaNode.NodejsFunction(this, 'DocumentResolveFunction', {
+      ...nodeOptions,
+      entry: path.join(backendPath, 'api/documents/resolve.ts'),
       handler: 'handler',
       environment: {
         ...nodeOptions.environment,
@@ -553,8 +573,11 @@ exports.handler = async (event) => {
     applicationsResource.addMethod('GET', new apigateway.LambdaIntegration(applicationListFn));
     applicationsResource.addMethod('POST', new apigateway.LambdaIntegration(applicationCreateFn));
 
-    const documentIdResource = documentsResource.addResource('{id}').addResource('status');
-    documentIdResource.addMethod('GET', new apigateway.LambdaIntegration(documentStatusFn));
+    const documentByIdResource = documentsResource.addResource('{id}');
+    const documentStatusResource = documentByIdResource.addResource('status');
+    documentStatusResource.addMethod('GET', new apigateway.LambdaIntegration(documentStatusFn));
+    const documentResolveResource = documentByIdResource.addResource('resolve');
+    documentResolveResource.addMethod('POST', new apigateway.LambdaIntegration(documentResolveFn));
 
     const voiceQueryFn = new lambdaNode.NodejsFunction(this, 'VoiceQueryFunction', {
       ...nodeOptions,
@@ -594,6 +617,37 @@ exports.handler = async (event) => {
       timeout: cdk.Duration.seconds(29),
     }));
     voiceBaseResource.addResource('transcribe').addMethod('POST', new apigateway.LambdaIntegration(voiceTranscribeFn));
+
+    const telegramWebhookFn = new lambdaNode.NodejsFunction(this, 'TelegramWebhookFunction', {
+      ...nodeOptions,
+      entry: path.join(backendPath, 'api/telegram/webhook.ts'),
+      handler: 'handler',
+      timeout: cdk.Duration.seconds(60),
+      memorySize: 1024,
+      description: 'VaaniSetu Telegram bot webhook – forwards messages to assistant',
+      environment: {
+        ...nodeOptions.environment,
+        BEDROCK_AGENT_ID: process.env.BEDROCK_AGENT_ID || '',
+        BEDROCK_AGENT_ALIAS_ID: process.env.BEDROCK_AGENT_ALIAS_ID || 'TSTALIASID',
+        BEDROCK_GUARDRAIL_ID: process.env.BEDROCK_GUARDRAIL_ID || '',
+        DOCUMENTS_TABLE: documentsTable.tableName,
+        TELEGRAM_AUTH_TABLE: telegramAuthTable.tableName,
+        BEDROCK_AGENT_ENABLE_TRACE: 'true',
+        BEDROCK_AGENT_TIMEOUT_MS: '24000',
+        BEDROCK_AGENT_FALLBACK_ALIAS_ID: process.env.BEDROCK_AGENT_FALLBACK_ALIAS_ID || '',
+        BEDROCK_GUARDRAIL_VERSION: process.env.BEDROCK_GUARDRAIL_VERSION || 'DRAFT',
+        APPLICATION_CONFIRMATION_SECRET: process.env.APPLICATION_CONFIRMATION_SECRET || 'vaanisetu-prod-secret-change-me',
+        SESSION_TTL_SECONDS: '3600',
+        ALLOW_LOCAL_DATA_FALLBACK: 'true',
+        TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || this.node.tryGetContext('telegramBotToken') || '',
+      },
+    });
+    const telegramResource = api.root.addResource('telegram').addResource('webhook');
+    telegramResource.addMethod('POST', new apigateway.LambdaIntegration(telegramWebhookFn));
+    new cdk.CfnOutput(this, 'TelegramWebhookLambdaName', {
+      value: telegramWebhookFn.functionName,
+      description: 'Lambda function name for Telegram webhook (set TELEGRAM_BOT_TOKEN in its env if bot does not reply)',
+    });
 
     const jobsListFn = new lambdaNode.NodejsFunction(this, 'JobsListFunction', {
       ...nodeOptions,
@@ -733,6 +787,18 @@ exports.handler = async (event) => {
       preventUserExistenceErrors: true,
     });
 
+    telegramWebhookFn.addEnvironment('USER_POOL_ID', userPool.userPoolId);
+    telegramWebhookFn.addEnvironment('USER_POOL_CLIENT_ID', userPoolClient.userPoolClientId);
+    lambdaExecutionRole.addToPolicy(new iam.PolicyStatement({
+      actions: [
+        'cognito-idp:AdminInitiateAuth',
+        'cognito-idp:AdminRespondToAuthChallenge',
+        'cognito-idp:AdminCreateUser',
+        'cognito-idp:AdminGetUser',
+      ],
+      resources: [userPool.userPoolArn],
+    }));
+
     const dashboard = new cloudwatch.Dashboard(this, 'VaaniSetuDashboard', {
       dashboardName: 'VaaniSetu-Operations',
     });
@@ -749,6 +815,7 @@ exports.handler = async (event) => {
       applicationCreateFn,
       voiceQueryFn,
       voiceTranscribeFn,
+      telegramWebhookFn,
       jobsListFn,
       jobsMatchFn,
       userProfileFn,

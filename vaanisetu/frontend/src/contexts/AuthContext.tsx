@@ -67,13 +67,16 @@ function normalizePhone(value: unknown): string | undefined {
 function authUserToUser(a: AuthUser, claims?: Record<string, unknown>): User {
   const claimName = typeof claims?.name === 'string' ? claims.name.trim() : '';
   const claimPhone = normalizePhone(claims?.phone_number);
+  const username = (a as unknown as { username?: string }).username;
+  const phoneFromUsername = username && /^\+?\d{10,13}$/.test(username.replace(/\D/g, '')) ? normalizePhone(username) : undefined;
+  const phone = claimPhone ?? phoneFromUsername;
   const claimEmail = typeof claims?.email === 'string' ? claims.email : undefined;
-  const fallbackName = (a as unknown as { username?: string }).username ?? 'User';
+  const fallbackName = username ?? 'User';
   return {
-    id: a.userId ?? (a as unknown as { username?: string }).username ?? '',
+    id: a.userId ?? username ?? '',
     name: claimName || fallbackName,
     email: claimEmail,
-    phone: claimPhone,
+    phone,
   };
 }
 
@@ -122,7 +125,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const claims = (session.tokens?.idToken?.payload ?? {}) as Record<string, unknown>;
       const nextUser = authUserToUser(currentUser, claims);
       setUser(nextUser);
-      setUserId(nextUser.id || null);
+      setUserId((nextUser.phone ?? nextUser.id) || null);
     } catch {
       setUser(null);
       setUserId(null);
@@ -163,7 +166,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const claims = (session.tokens?.idToken?.payload ?? {}) as Record<string, unknown>;
       const nextUser = authUserToUser(currentUser, claims);
       setUser(nextUser);
-      setUserId(nextUser.id || null);
+      setUserId((nextUser.phone ?? nextUser.id) || null);
     }
   }, []);
 
@@ -189,10 +192,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback((u: User) => {
     setUser(u);
-    setUserId(u.id);
-    apiUserId = u.id;
+    const apiId = u.phone ?? u.id;
+    setUserId(apiId);
+    apiUserId = apiId;
     if (import.meta.env.DEV && typeof localStorage !== 'undefined') {
-      localStorage.setItem(DEV_USER_KEY, JSON.stringify({ userId: u.id }));
+      localStorage.setItem(DEV_USER_KEY, JSON.stringify({ userId: apiId }));
     }
   }, []);
 
